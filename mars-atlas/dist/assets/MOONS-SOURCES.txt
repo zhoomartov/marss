@@ -1,0 +1,7 @@
+NASA/JPL-Caltech — Phobos and Deimos 3D models
+https://science.nasa.gov/resource/phobos-mars-moon-3d-model/
+https://science.nasa.gov/resource/deimos-mars-moon-3d-model/
+Downloaded 2026-11-13, GLB files unchanged.
+https://assets.science.nasa.gov/content/dam/science/psd/mars/resources/gltf_files/24878_Phobos_1_1000.glb
+https://assets.science.nasa.gov/content/dam/science/psd/mars/resources/gltf_files/24879_Deimos_1_1000.glb
+GLTFLoader.js and BufferGeometryUtils.js: Three.js 0.170.0, MIT, same license as bundled Three.js. Loader utility import adjusted for local layout.

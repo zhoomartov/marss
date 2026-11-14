@@ -1,0 +1,68 @@
+[
+  {
+    "id": "jezero-delta",
+    "name": "Jezero · western delta",
+    "description": "Layered delta terrain and scarps",
+    "dem": "./data/jezero-delta-dem.json",
+    "image": "./data/jezero-delta-ortho.png",
+    "imageResolutionM": 0.4779490561300008,
+    "nativeImageResolutionM": 0.25490608802050024,
+    "imageSourceUrl": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/mars/mro/hirise/controlled/dtm/PSP_002387_1985_PSP_003798_1985/PSP_002387_1985_RED_A_01_ORTHO.tif",
+    "imagePageUrl": "https://stac.astrogeology.usgs.gov/docs/data/mars/hirise_dtms/",
+    "imageWidth": 2048,
+    "imageHeight": 2048,
+    "imageBounds": [
+      4587668.485762586,
+      1093721.1524564482,
+      4588647.32542954,
+      1094699.9921234027
+    ],
+    "imageProcessing": "RED-band monochrome orthoimage. Bilinear sampling to exact DEM footprint; linear 1–99 percentile contrast stretch.",
+    "imageMissingPercent": 0.15718936920166016,
+    "sourceItemId": "DTEEC_002387_1985_003798_1985_A01"
+  },
+  {
+    "id": "jezero-landing",
+    "name": "Jezero · landing plain",
+    "description": "Crater-floor terrain near the Perseverance landing area",
+    "dem": "./data/jezero-landing-dem.json",
+    "image": "./data/jezero-landing-ortho.png",
+    "imageResolutionM": 0.4765093603245987,
+    "nativeImageResolutionM": 0.2541382261019006,
+    "imageSourceUrl": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/mars/mro/hirise/controlled/dtm/ESP_045994_1985_ESP_046060_1985/ESP_046060_1985_RED_A_01_ORTHO.tif",
+    "imagePageUrl": "https://stac.astrogeology.usgs.gov/docs/data/mars/hirise_dtms/",
+    "imageWidth": 2048,
+    "imageHeight": 2048,
+    "imageBounds": [
+      4590391.103839435,
+      1092810.4470519691,
+      4591366.995009379,
+      1093786.338221914
+    ],
+    "imageProcessing": "RED-band monochrome orthoimage. Bilinear sampling to exact DEM footprint; linear 1–99 percentile contrast stretch.",
+    "imageMissingPercent": 0.0002384185791015625,
+    "sourceItemId": "DTEEC_045994_1985_046060_1985_U01"
+  },
+  {
+    "id": "jezero-east",
+    "name": "Jezero · eastern floor",
+    "description": "Crater-floor ridges and small impact features",
+    "dem": "./data/jezero-east-dem.json",
+    "image": "./data/jezero-east-ortho.png",
+    "imageResolutionM": 0.4765409978531352,
+    "nativeImageResolutionM": 0.25415495004373984,
+    "imageSourceUrl": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/mars/mro/hirise/controlled/dtm/ESP_048842_1985_ESP_048908_1985/ESP_048842_1985_RED_A_01_ORTHO.tif",
+    "imagePageUrl": "https://stac.astrogeology.usgs.gov/docs/data/mars/hirise_dtms/",
+    "imageWidth": 2048,
+    "imageHeight": 2048,
+    "imageBounds": [
+      4593893.962078806,
+      1092834.182385935,
+      4594869.918042409,
+      1093810.138349538
+    ],
+    "imageProcessing": "RED-band monochrome orthoimage. Bilinear sampling to exact DEM footprint; linear 1–99 percentile contrast stretch.",
+    "imageMissingPercent": 0.0008106231689453125,
+    "sourceItemId": "DTEEC_048842_1985_048908_1985_U01"
+  }
+]
