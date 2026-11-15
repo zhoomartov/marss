@@ -12,6 +12,8 @@ import {
   buildTerrainGeometryData,
   sampleFeatureElevations,
   sanitizeElevations,
+  projectRouteOnTerrain,
+  haversineKm,
 } from './public/mars-coords.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -197,4 +199,145 @@ test('REST API server serves locations CRUD, live/cached S16 DEM, and aligned sa
   ).then((r) => r.json());
   assert.equal(meta2.elevation.cached, true);
   assert.equal(meta2.texture.cached, true);
+});
+
+test('projectRouteOnTerrain drapes a GPS line onto the DEM and computes ascent/length', () => {
+  const width = 33;
+  const height = 33;
+  const elevations = new Int16Array(width * height);
+  for (let r = 0; r < height; r++) {
+    for (let c = 0; c < width; c++) elevations[r * width + c] = r * 200;
+  }
+  const bounds = { west: -2, east: 2, south: -2, north: 2, centerLat: 0, centerLon: 0 };
+  const clean = sanitizeElevations(elevations, width, height);
+  const mesh = buildTerrainGeometryData({
+    elevations: clean,
+    width,
+    height,
+    bounds,
+    verticalExaggeration: 2,
+    profileMode: 'ns',
+  });
+
+  const route = [
+    { lat: -1.5, lon: 0 },
+    { lat: 0, lon: 0 },
+    { lat: 1.5, lon: 0 },
+  ];
+  const { points, stats } = projectRouteOnTerrain(route, clean, width, height, bounds, mesh.stats);
+
+  assert.equal(points.length, 3);
+  assert.ok(points.every((p) => Number.isFinite(p.elevM) && Number.isFinite(p.worldY)));
+  assert.ok(points[0].elevM > points[2].elevM, 'south (high row) → north (low row) descends');
+  assert.ok(stats.ascentM + stats.descentM > 0);
+  assert.ok(stats.lengthKm > 100, `Expected Mars-scale distance, got ${stats.lengthKm}`);
+  assert.ok(stats.maxSlopeDeg >= 0);
+  assert.ok(points.every((p) => p.inside));
+
+  const glab = haversineKm({ lat: 0, lon: 0 }, { lat: 0, lon: 90 });
+  assert.ok(Math.abs(glab - (Math.PI / 2) * 3389.5) < 1);
+});
+
+test('REST API serves mission regions, region DEMs, GPX routes, and surface refresh', async (t) => {
+  const testPort = 4291;
+  const proc = spawn(process.execPath, ['server.mjs'], {
+    cwd: __dirname,
+    env: { ...process.env, PORT: String(testPort) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  t.after(() => {
+    proc.kill('SIGTERM');
+  });
+
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Server start timeout')), 15000);
+    proc.stdout.on('data', (chunk) => {
+      if (String(chunk).includes(`127.0.0.1:${testPort}`)) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    proc.on('exit', (code) => {
+      clearTimeout(timer);
+      reject(new Error(`Server exited early with code ${code}`));
+    });
+  });
+
+  const base = `http://127.0.0.1:${testPort}`;
+
+  const regions = await fetch(`${base}/api/regions`).then((r) => r.json());
+  assert.ok(Array.isArray(regions.regions) && regions.regions.length >= 1);
+  const jezero = regions.regions.find((r) => r.id === 'jezero-delta');
+  assert.ok(jezero, 'Expected jezero-delta mission region');
+  assert.ok(jezero.bounds.west < jezero.bounds.east);
+  assert.ok(jezero.demUrl.includes('/api/regions/'));
+
+  const demRes = await fetch(`${base}${jezero.demUrl}`);
+  assert.equal(demRes.status, 200);
+  const gw = Number(demRes.headers.get('X-Grid-Width'));
+  const gh = Number(demRes.headers.get('X-Grid-Height'));
+  const demBuf = await demRes.arrayBuffer();
+  assert.ok(gw > 0 && gh > 0);
+  assert.equal(demBuf.byteLength, gw * gh * 4);
+
+  const imgRes = await fetch(`${base}${jezero.surfaceUrl}`);
+  assert.equal(imgRes.status, 200);
+  assert.ok(Number(imgRes.headers.get('content-length') || 0) > 1000);
+
+  const badRoute = await fetch(`${base}/api/routes`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'Broken', points: [{ lat: 0, lon: 0 }] }),
+  });
+  assert.equal(badRoute.status, 400);
+
+  const createRes = await fetch(`${base}/api/routes`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Test GPS Route',
+      source: 'unit-test',
+      region: jezero.name,
+      points: [
+        { lat: 18.4, lon: 77.4, elevM: -2600 },
+        { lat: 18.42, lon: 77.42, elevM: -2550 },
+        { lat: 18.44, lon: 77.45, elevM: -2500 },
+      ],
+      direct: [
+        { lat: 18.4, lon: 77.4 },
+        { lat: 18.44, lon: 77.45 },
+      ],
+      metrics: { oneWayKm: 0.6, energy: 0.12, maxSlopeDeg: 4.2 },
+    }),
+  });
+  assert.equal(createRes.status, 201);
+  const created = await createRes.json();
+  const route = created.route;
+
+  try {
+    assert.equal(route.name, 'Test GPS Route');
+    assert.equal(route.pointCount, 3);
+    assert.ok(route.center.lat > 18.4 && route.center.lat < 18.44);
+
+    const fetched = await fetch(`${base}/api/routes/${encodeURIComponent(route.id)}`).then((r) => r.json());
+    assert.equal(fetched.route.id, route.id);
+
+    const gpxRes = await fetch(`${base}/api/routes/${encodeURIComponent(route.id)}/gpx`);
+    assert.equal(gpxRes.status, 200);
+    const gpx = await gpxRes.text();
+    assert.ok(gpx.includes('<trkpt lat="18.4"'));
+    assert.ok(gpx.includes('<ele>-2600</ele>'));
+
+    const refreshRes = await fetch(`${base}/api/surface/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ region: 'jezero-delta' }),
+    });
+    assert.equal(refreshRes.status, 200);
+    const refreshed = await refreshRes.json();
+    assert.equal(typeof refreshed.removed, 'number');
+  } finally {
+    await fetch(`${base}/api/routes/${encodeURIComponent(route.id)}`, { method: 'DELETE' }).catch(() => {});
+  }
 });

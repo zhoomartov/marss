@@ -420,7 +420,7 @@ a {
 /* Stage Column (3D + SVG Dock) */
 .stage-column {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) 225px;
+  grid-template-rows: minmax(0, 1fr) 225px auto;
   height: 100%;
   min-width: 0;
 }
@@ -747,6 +747,102 @@ a {
   text-overflow: ellipsis;
 }
 
+/* 2D surface route map */
+#surface-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 3 / 2;
+  cursor: crosshair;
+}
+
+.surface-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.surface-actions .ghost-btn {
+  align-self: flex-start;
+}
+
+/* GPS route panel shared from the Safe Route Lab */
+.route-dock {
+  border-top: 1px solid var(--line);
+  background: #08111b;
+  padding: 10px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.route-dock[hidden] {
+  display: none;
+}
+
+.route-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.route-head h3 {
+  margin: 3px 0 0;
+  font: 20px/1.15 'Instrument Serif', Georgia, serif;
+  font-weight: 400;
+  color: var(--accent-bright);
+}
+
+.route-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.route-actions .chip-btn {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+.route-stats {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.route-stats > div {
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: #0d1826;
+  border: 1px solid #b8c8de17;
+}
+
+.route-stats dt {
+  font: 8px ui-monospace, SFMono-Regular, monospace;
+  color: #8296ab;
+  letter-spacing: 0.6px;
+}
+
+.route-stats dd {
+  margin: 3px 0 0;
+  font: 12px ui-monospace, SFMono-Regular, monospace;
+  color: #eaf0f6;
+}
+
+.route-pin span {
+  border-color: #7cd4a688;
+  color: #bdf5d6;
+}
+
+.route-pin.route-goal span {
+  border-color: #ffdc7a88;
+  color: #ffe9ad;
+}
+
 @media (max-width: 1120px) {
   html, body {
     overflow: auto;
@@ -756,10 +852,13 @@ a {
     height: auto;
   }
   .stage-column {
-    grid-template-rows: 520px auto;
+    grid-template-rows: 520px auto auto;
     height: auto;
   }
   .profile-body {
     grid-template-columns: 1fr;
+  }
+  .route-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

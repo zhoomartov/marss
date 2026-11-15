@@ -30,7 +30,7 @@ export function clampLat(lat, maxAbs = 86) {
 export function clampSpan(spanDeg) {
   const n = Number(spanDeg);
   if (!Number.isFinite(n)) return 3;
-  return Math.max(0.25, Math.min(20, n));
+  return Math.max(0.01, Math.min(20, n));
 }
 
 /**
@@ -173,6 +173,99 @@ export function sampleFeatureElevations(features, clean, width, height, bounds, 
 }
 
 /**
+ * Great-circle distance in kilometres between two Mars coordinates.
+ */
+export function haversineKm(a, b, radiusKm = MARS_MEAN_RADIUS_KM) {
+  const toRad = Math.PI / 180;
+  const dLat = (a.lat - b.lat) * toRad;
+  const dLon = (a.lon - b.lon) * toRad;
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(a.lat * toRad) * Math.cos(b.lat * toRad) * Math.sin(dLon / 2) ** 2;
+  return 2 * radiusKm * Math.asin(Math.sqrt(Math.min(1, h)));
+}
+
+function sampleBilinear(grid, width, height, u, v) {
+  const x = Math.max(0, Math.min(width - 1, u * (width - 1)));
+  const y = Math.max(0, Math.min(height - 1, v * (height - 1)));
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const x1 = Math.min(width - 1, x0 + 1);
+  const y1 = Math.min(height - 1, y0 + 1);
+  const fx = x - x0;
+  const fy = y - y0;
+  const top = grid[y0 * width + x0] * (1 - fx) + grid[y0 * width + x1] * fx;
+  const bottom = grid[y1 * width + x0] * (1 - fx) + grid[y1 * width + x1] * fx;
+  return top * (1 - fy) + bottom * fy;
+}
+
+/**
+ * Drapes a GPS track (lat/lon points) onto the generated terrain mesh.
+ * Returns world coordinates, sampled DEM elevations, cumulative distance and route statistics.
+ */
+export function projectRouteOnTerrain(routePoints, clean, width, height, bounds, stats) {
+  if (!Array.isArray(routePoints) || routePoints.length < 2) {
+    return { points: [], stats: null };
+  }
+  const lonSpan = Math.max(1e-9, bounds.east - bounds.west);
+  const latSpan = Math.max(1e-9, bounds.north - bounds.south);
+  const out = [];
+  let distKm = 0;
+  let ascentM = 0;
+  let descentM = 0;
+  let minElevM = Infinity;
+  let maxElevM = -Infinity;
+  let maxSlopeDeg = 0;
+
+  for (let i = 0; i < routePoints.length; i++) {
+    const p = routePoints[i];
+    const u = Math.max(0, Math.min(1, (normalizeLon(p.lon) - bounds.west) / lonSpan));
+    const v = Math.max(0, Math.min(1, (bounds.north - p.lat) / latSpan));
+    const elevM = sampleBilinear(clean, width, height, u, v);
+    const prev = out[i - 1];
+
+    if (prev) {
+      const stepKm = haversineKm(prev, p);
+      distKm += stepKm;
+      const deltaH = elevM - prev.elevM;
+      if (deltaH > 0) ascentM += deltaH;
+      else descentM -= deltaH;
+      if (stepKm > 1e-6) {
+        maxSlopeDeg = Math.max(maxSlopeDeg, Math.atan(Math.abs(deltaH) / (stepKm * 1000)) * (180 / Math.PI));
+      }
+    }
+
+    if (elevM < minElevM) minElevM = elevM;
+    if (elevM > maxElevM) maxElevM = elevM;
+
+    out.push({
+      lat: Number(p.lat.toFixed(6)),
+      lon: Number(normalizeLon(p.lon).toFixed(6)),
+      elevM: Math.round(elevM),
+      sourceElevM: Number.isFinite(Number(p.elevM)) ? Math.round(Number(p.elevM)) : null,
+      distKm: Number(distKm.toFixed(3)),
+      slopeDeg: Number.isFinite(Number(p.slopeDeg)) ? Number(p.slopeDeg) : null,
+      worldX: -stats.meshWidth / 2 + u * stats.meshWidth,
+      worldY: (elevM - stats.minElevM) * stats.elevScale,
+      worldZ: -stats.meshDepth / 2 + v * stats.meshDepth,
+      inside: u > 0 && u < 1 && v > 0 && v < 1,
+    });
+  }
+
+  const routeStats = {
+    lengthKm: Number(distKm.toFixed(3)),
+    ascentM: Math.round(ascentM),
+    descentM: Math.round(descentM),
+    minElevM: Number.isFinite(minElevM) ? Math.round(minElevM) : 0,
+    maxElevM: Number.isFinite(maxElevM) ? Math.round(maxElevM) : 0,
+    maxSlopeDeg: Number(maxSlopeDeg.toFixed(2)),
+    points: out.length,
+  };
+
+  return { points: out, stats: routeStats };
+}
+
+/**
  * Builds 3D Three.js BufferGeometry typed arrays + physical slope statistics + SVG cross-section profile.
  * Designed to run inside a Web Worker with Transferable ArrayBuffers.
  */
@@ -184,6 +277,8 @@ export function buildTerrainGeometryData({
   verticalExaggeration = 4,
   profileMode = 'ew', // 'ew' (West->East center), 'ns' (North->South center), 'diag' (SW->NE)
   worldSize = 120,
+  routePoints = null,
+  directPoints = null,
 }) {
   const clean = elevations instanceof Float32Array ? elevations : sanitizeElevations(elevations, width, height);
   const count = width * height;
@@ -357,27 +452,34 @@ export function buildTerrainGeometryData({
     });
   }
 
+  const statistics = {
+    width,
+    height,
+    minElevM: Math.round(minElevM),
+    maxElevM: Math.round(maxElevM),
+    meanElevM: Math.round(meanElevM),
+    reliefM: Math.round(reliefM),
+    meanSlopeDeg: Number((sumSlopeDeg / count).toFixed(2)),
+    maxSlopeDeg: Number(maxSlopeDeg.toFixed(2)),
+    widthKm: Number(widthKm.toFixed(1)),
+    depthKm: Number(depthKm.toFixed(1)),
+    meshWidth,
+    meshDepth,
+    unitsPerKm,
+    elevScale,
+  };
+
+  const route = projectRouteOnTerrain(routePoints, clean, width, height, bounds, statistics);
+  const direct = projectRouteOnTerrain(directPoints, clean, width, height, bounds, statistics);
+
   return {
     positions,
     normals,
     uvs,
     indices,
     profile,
-    stats: {
-      width,
-      height,
-      minElevM: Math.round(minElevM),
-      maxElevM: Math.round(maxElevM),
-      meanElevM: Math.round(meanElevM),
-      reliefM: Math.round(reliefM),
-      meanSlopeDeg: Number((sumSlopeDeg / count).toFixed(2)),
-      maxSlopeDeg: Number(maxSlopeDeg.toFixed(2)),
-      widthKm: Number(widthKm.toFixed(1)),
-      depthKm: Number(depthKm.toFixed(1)),
-      meshWidth,
-      meshDepth,
-      unitsPerKm,
-      elevScale,
-    },
+    stats: statistics,
+    route,
+    direct,
   };
 }

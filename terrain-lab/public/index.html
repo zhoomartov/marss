@@ -53,6 +53,24 @@
         <p class="hint-line">Клик по 2D-карте переводит (x, y) → (lat, lon), строит 3D-меш и обновляет профиль высот.</p>
       </section>
 
+      <section class="panel-block surface-block">
+        <div class="block-head">
+          <div>
+            <div class="eyebrow">02 / SURFACE ROUTE MAP</div>
+            <h2>2D-поверхность + GPS</h2>
+          </div>
+          <span class="coord-hover" id="surface-hover-readout">Клик по карте: замер · Двойной клик: центрировать 3D</span>
+        </div>
+        <div class="canvas-frame surface-frame">
+          <canvas id="surface-canvas" width="720" height="480" aria-label="2D surface map with GPS route overlay"></canvas>
+          <div class="canvas-compass" id="surface-source-label">Поверхность не загружена</div>
+        </div>
+        <div class="surface-actions">
+          <button type="button" id="surface-refresh" class="ghost-btn">Обновить поверхность ↻</button>
+          <span class="hint-line">Провайдер обновляем: глобальные WMS-слои или локальные HiRISE-зоны из mission-regions.json.</span>
+        </div>
+      </section>
+
       <section class="panel-block custom-block">
         <details id="custom-details" open>
           <summary>
@@ -154,6 +172,8 @@
 
           <div class="hud-toggles">
             <button type="button" id="toggle-pins" class="chip-btn active" title="Метки объектов на 3D-рельефе">Метки 3D</button>
+            <button type="button" id="toggle-route" class="chip-btn active" title="GPS-линия маршрута на рельефе">GPS-линия</button>
+            <button type="button" id="toggle-direct" class="chip-btn active" title="Прямая линия маршрута">Прямая</button>
             <button type="button" id="toggle-slice" class="chip-btn active" title="Линия разреза профиля в 3D">Линия среза</button>
             <button type="button" id="toggle-wire" class="chip-btn" title="Каркасная сетка вершин">Сетка</button>
             <button type="button" id="reset-camera" class="chip-btn" title="Сброс ракурса камеры">⟲ Камера</button>
@@ -226,6 +246,31 @@
             </div>
           </dl>
         </div>
+      </section>
+
+      <section class="route-dock" id="route-dock" hidden>
+        <div class="route-head">
+          <div>
+            <div class="eyebrow">05 / GPS-МАРШРУТ ИЗ 2D-ПЛАНИРОВЩИКА</div>
+            <h3 id="route-name">Маршрут</h3>
+            <p class="hint-line" id="route-source"></p>
+          </div>
+          <div class="route-actions">
+            <a id="route-gpx" class="chip-btn" href="#" download>GPX ↓</a>
+            <button type="button" id="route-clear" class="chip-btn">Убрать маршрут</button>
+          </div>
+        </div>
+        <dl class="route-stats">
+          <div><dt>ДЛИНА</dt><dd id="route-distance">—</dd></div>
+          <div><dt>ПОДЪЁМ</dt><dd id="route-ascent">—</dd></div>
+          <div><dt>МАКС. УКЛОН</dt><dd id="route-slope">—</dd></div>
+          <div><dt>ЭНЕРГИЯ</dt><dd id="route-energy">—</dd></div>
+          <div><dt>ТОЧЕК GPS</dt><dd id="route-points">—</dd></div>
+        </dl>
+        <p class="hint-line">
+          Линия драпируется по высотам DEM: зелёная — выбранный маршрут, розовый пунктир — прямая.
+          Источник: Safe Route Lab. При открытии зоны Jezero используется локальный HiRISE DEM и ортофото.
+        </p>
       </section>
     </section>
   </main>

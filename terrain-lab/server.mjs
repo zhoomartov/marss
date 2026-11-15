@@ -17,6 +17,10 @@ const DATA_DIR = path.join(__dirname, 'data');
 const CACHE_DIR = path.join(__dirname, 'cache');
 const CUSTOM_LOCATIONS_FILE = path.join(DATA_DIR, 'locations.json');
 const OFFICIAL_CATALOG_FILE = path.join(DATA_DIR, 'mars-nomenclature.json');
+const ROUTES_FILE = path.join(DATA_DIR, 'routes.json');
+const MARS_DIST_DIR = process.env.MARS_DIST_DIR || path.join(__dirname, '..', 'mars-atlas', 'dist');
+const REGION_PROJECTION = { radius: 3396190, standardParallel: 0, centralLongitude: 0 };
+const RAD = Math.PI / 180;
 
 const PORT = Number(process.env.PORT || 4174);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -346,17 +350,265 @@ function sendJson(res, status, payload) {
   res.end(body);
 }
 
-async function readJsonBody(req) {
+async function readJsonBody(req, limitBytes = 256 * 1024) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 256 * 1024) throw new Error('Payload too large');
+    if (size > limitBytes) throw new Error('Payload too large');
     chunks.push(chunk);
   }
   const raw = Buffer.concat(chunks).toString('utf8');
   return raw ? JSON.parse(raw) : {};
 }
+
+// ---------------------------------------------------------------------------
+// Shared surface-map providers: global WMS layers + local HiRISE mission zones.
+// Any future provider can be added to this registry or to mission-regions.json
+// without changing the client.
+// ---------------------------------------------------------------------------
+
+function projectedToLatLon(x, y, projection = REGION_PROJECTION) {
+  const r = Number(projection.radius) || REGION_PROJECTION.radius;
+  const std = Number(projection.standardParallel) || 0;
+  const cLon = Number(projection.centralLongitude) || 0;
+  return {
+    lon: cLon + x / (r * Math.cos(std * RAD)) / RAD,
+    lat: y / r / RAD,
+  };
+}
+
+function latLonBoundsFromProjected([minX, minY, maxX, maxY], projection) {
+  const sw = projectedToLatLon(minX, minY, projection);
+  const ne = projectedToLatLon(maxX, maxY, projection);
+  return {
+    west: Number(sw.lon.toFixed(6)),
+    south: Number(sw.lat.toFixed(6)),
+    east: Number(ne.lon.toFixed(6)),
+    north: Number(ne.lat.toFixed(6)),
+  };
+}
+
+let missionRegionsCache = null;
+
+export async function listMissionRegions() {
+  if (missionRegionsCache) return missionRegionsCache;
+  const raw = await fs.readFile(path.join(MARS_DIST_DIR, 'data', 'mission-regions.json'), 'utf8');
+  const list = JSON.parse(raw);
+  missionRegionsCache = list.map((region) => {
+    const bounds =
+      region.bounds ||
+      (Array.isArray(region.imageBounds)
+        ? latLonBoundsFromProjected(region.imageBounds, region.projection || REGION_PROJECTION)
+        : null);
+    return {
+      ...region,
+      bounds,
+      provider: 'hirise-local',
+      surfaceUrl: `/api/regions/${encodeURIComponent(region.id)}/image`,
+      demUrl: `/api/regions/${encodeURIComponent(region.id)}/dem`,
+      demType: 'float32',
+    };
+  });
+  return missionRegionsCache;
+}
+
+async function ensureRegionDemCached(id) {
+  const region = (await listMissionRegions()).find((item) => item.id === id);
+  if (!region) throw new Error(`Unknown mission region: ${id}`);
+
+  await fs.mkdir(CACHE_DIR, { recursive: true });
+  const binPath = path.join(CACHE_DIR, `region_${id}_f32.bin`);
+  const metaPath = path.join(CACHE_DIR, `region_${id}_f32.json`);
+
+  if (existsSync(binPath) && existsSync(metaPath)) {
+    const [bin, metaRaw] = await Promise.all([fs.readFile(binPath), fs.readFile(metaPath, 'utf8')]);
+    return { bin, meta: JSON.parse(metaRaw), cached: true };
+  }
+
+  const demFile = path.resolve(MARS_DIST_DIR, region.dem);
+  if (!demFile.startsWith(MARS_DIST_DIR + path.sep)) throw new Error('Region DEM path escapes data root');
+  const dem = JSON.parse(await fs.readFile(demFile, 'utf8'));
+  const values = Float32Array.from(dem.values);
+
+  let minElevM = Infinity;
+  let maxElevM = -Infinity;
+  let sum = 0;
+  let valid = 0;
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (Number.isFinite(v)) {
+      if (v < minElevM) minElevM = v;
+      if (v > maxElevM) maxElevM = v;
+      sum += v;
+      valid++;
+    }
+  }
+  if (!valid) minElevM = maxElevM = 0;
+  const meanElevM = valid ? sum / valid : 0;
+
+  const bin = Buffer.from(values.buffer, values.byteOffset, values.byteLength);
+  const meta = {
+    id,
+    width: dem.width,
+    height: dem.height,
+    bounds: dem.bounds,
+    projection: dem.projection,
+    provenance: dem.provenance,
+    anchors: dem.anchors,
+    minElevM: Math.round(minElevM),
+    maxElevM: Math.round(maxElevM),
+    meanElevM: Math.round(meanElevM),
+    reliefM: Math.round(maxElevM - minElevM),
+    source: dem.provenance?.title || `HiRISE DTM ${id}`,
+    createdAt: new Date().toISOString(),
+  };
+
+  await Promise.all([fs.writeFile(binPath, bin), fs.writeFile(metaPath, JSON.stringify(meta, null, 2))]);
+  return { bin, meta, cached: false };
+}
+
+async function serveRegionImage(res, region) {
+  const file = path.resolve(MARS_DIST_DIR, region.image);
+  if (!file.startsWith(MARS_DIST_DIR + path.sep)) {
+    res.writeHead(403).end('Forbidden');
+    return;
+  }
+  const data = await fs.readFile(file);
+  res.writeHead(200, {
+    'Content-Type': MIME_TYPES[path.extname(file)] || 'application/octet-stream',
+    'Content-Length': data.byteLength,
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': 'public, max-age=3600',
+  });
+  res.end(data);
+}
+
+// ---------------------------------------------------------------------------
+// Route persistence (GPS tracks shared from the 2D Safe Route Lab).
+// ---------------------------------------------------------------------------
+
+async function readRoutes() {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  if (!existsSync(ROUTES_FILE)) return [];
+  try {
+    const parsed = JSON.parse(await fs.readFile(ROUTES_FILE, 'utf8'));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeRoutes(list) {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  await fs.writeFile(ROUTES_FILE, JSON.stringify(list, null, 2) + '\n', 'utf8');
+}
+
+function normalizeRoutePoint(p) {
+  const lat = Number(p?.lat);
+  const lon = Number(p?.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90) return null;
+  const elevM = Number(p?.elevM);
+  return {
+    lat: Number(lat.toFixed(6)),
+    lon: Number(normalizeLon(lon).toFixed(6)),
+    elevM: Number.isFinite(elevM) ? Math.round(elevM) : null,
+    distKm: Number.isFinite(Number(p?.distKm)) ? Number(Number(p.distKm).toFixed(3)) : null,
+    slopeDeg: Number.isFinite(Number(p?.slopeDeg)) ? Number(Number(p.slopeDeg).toFixed(2)) : null,
+  };
+}
+
+function normalizeRoute(body) {
+  const name = String(body?.name || '').trim().slice(0, 120);
+  const rawPoints = Array.isArray(body?.points) ? body.points : [];
+  const points = rawPoints.map(normalizeRoutePoint).filter(Boolean);
+  const fail = (message) => {
+    const error = new Error(message);
+    error.statusCode = 400;
+    throw error;
+  };
+  if (!name) fail('Route name is required');
+  if (points.length < 2) fail('A route needs at least two valid points');
+  if (points.length > 6000) fail('Route has too many points (max 6000)');
+
+  const lats = points.map((p) => p.lat);
+  const lons = points.map((p) => p.lon);
+  const bounds = {
+    west: Number(Math.min(...lons).toFixed(6)),
+    east: Number(Math.max(...lons).toFixed(6)),
+    south: Number(Math.min(...lats).toFixed(6)),
+    north: Number(Math.max(...lats).toFixed(6)),
+  };
+  const center = {
+    lat: Number(((bounds.south + bounds.north) / 2).toFixed(6)),
+    lon: Number(((bounds.west + bounds.east) / 2).toFixed(6)),
+  };
+  const direct = Array.isArray(body?.direct)
+    ? body.direct.map(normalizeRoutePoint).filter(Boolean).slice(0, 2000)
+    : [];
+
+  const metrics = body?.metrics && typeof body.metrics === 'object' ? body.metrics : null;
+
+  return {
+    id: `route-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    name,
+    source: String(body?.source || 'ARES Safe Route Lab').slice(0, 80),
+    region: body?.region ? String(body.region).slice(0, 80) : null,
+    status: body?.status ? String(body.status).slice(0, 40) : null,
+    center,
+    bounds,
+    metrics,
+    pointCount: points.length,
+    points,
+    direct,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function xmlEscape(value) {
+  return String(value ?? '').replace(/[<>&"']/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[ch]));
+}
+
+function routeToGpx(route) {
+  const trackPoints = route.points
+    .map((p) => {
+      const ele = Number.isFinite(p.elevM) ? `<ele>${p.elevM}</ele>` : '';
+      const time = '';
+      return `      <trkpt lat="${p.lat}" lon="${p.lon}">${ele}${time}</trkpt>`;
+    })
+    .join('\n');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="ARES 3D Terrain Lab" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata>
+    <name>${xmlEscape(route.name)}</name>
+    <time>${route.createdAt}</time>
+  </metadata>
+  <trk>
+    <name>${xmlEscape(route.name)}</name>
+    <trkseg>
+${trackPoints}
+    </trkseg>
+  </trk>
+</gpx>
+`;
+}
+
+async function clearSurfaceCache({ layer, region, all } = {}) {
+  await fs.mkdir(CACHE_DIR, { recursive: true });
+  const files = await fs.readdir(CACHE_DIR);
+  let removed = 0;
+  for (const name of files) {
+    let match = false;
+    if (all) match = true;
+    else if (region) match = name.startsWith(`region_${region}_`);
+    else if (layer) match = name.startsWith(`tex_${layer}_`);
+    if (!match) continue;
+    await fs.rm(path.join(CACHE_DIR, name), { force: true });
+    removed++;
+  }
+  return removed;
+}
+
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -593,7 +845,138 @@ export function createTerrainServer() {
         return;
       }
 
-      // 6. Static frontend files from public/
+      // 6. Surface-map providers: local HiRISE mission zones and future sources
+      if (pathname === '/api/regions' && req.method === 'GET') {
+        const regions = await listMissionRegions();
+        sendJson(res, 200, { regions, providers: ['hirise-local', 'usgs-wms', 'nasa-trek'] });
+        return;
+      }
+
+      const regionMatch = pathname.match(/^\/api\/regions\/([^/]+)\/(dem|image)$/);
+      if (regionMatch && req.method === 'GET') {
+        const id = regionMatch[1];
+        const kind = regionMatch[2];
+        const region = (await listMissionRegions()).find((item) => item.id === id);
+        if (!region) {
+          sendJson(res, 404, { error: `Unknown region: ${id}` });
+          return;
+        }
+        if (kind === 'image') {
+          await serveRegionImage(res, region);
+          return;
+        }
+        const { bin, meta, cached } = await ensureRegionDemCached(id);
+        res.writeHead(200, {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': bin.byteLength,
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Expose-Headers': 'X-Grid-Width, X-Grid-Height, X-Cache',
+          'X-Grid-Width': String(meta.width),
+          'X-Grid-Height': String(meta.height),
+          'X-Cache': cached ? 'HIT' : 'MISS',
+          'Cache-Control': 'public, max-age=86400',
+        });
+        res.end(bin);
+        return;
+      }
+
+      if (pathname === '/api/surface' && req.method === 'GET') {
+        const regions = await listMissionRegions();
+        sendJson(res, 200, {
+          globalLayers: Object.values(TEXTURE_LAYERS).map((layer) => ({
+            id: layer.id,
+            name: layer.name,
+            provider: 'usgs-wms',
+          })),
+          localRegions: regions.map((region) => ({
+            id: region.id,
+            name: region.name,
+            bounds: region.bounds,
+            imageResolutionM: region.imageResolutionM,
+            surfaceUrl: region.surfaceUrl,
+            demUrl: region.demUrl,
+            demType: region.demType,
+          })),
+        });
+        return;
+      }
+
+      if (pathname === '/api/surface/refresh' && req.method === 'POST') {
+        const body = await readJsonBody(req).catch(() => ({}));
+        const removed = await clearSurfaceCache({
+          layer: body.layer ? String(body.layer).slice(0, 40) : undefined,
+          region: body.region ? String(body.region).slice(0, 80) : undefined,
+          all: Boolean(body.all),
+        });
+        sendJson(res, 200, { refreshed: true, removed });
+        return;
+      }
+
+      // 7. GPS route tracks shared from the 2D Safe Route Lab
+      if (pathname === '/api/routes' && req.method === 'GET') {
+        const routes = await readRoutes();
+        sendJson(res, 200, {
+          routes: routes.map(({ points, direct, metrics, ...rest }) => ({
+            ...rest,
+            pointCount: points?.length ?? rest.pointCount ?? 0,
+            oneWayKm: metrics?.oneWayKm ?? null,
+            energyKwh: metrics?.energy ?? null,
+            hours: metrics?.hours ?? null,
+          })),
+        });
+        return;
+      }
+
+      if (pathname === '/api/routes' && req.method === 'POST') {
+        const body = await readJsonBody(req, 4 * 1024 * 1024);
+        const route = normalizeRoute(body);
+        const routes = await readRoutes();
+        routes.unshift(route);
+        await writeRoutes(routes.slice(0, 80));
+        sendJson(res, 201, { route });
+        return;
+      }
+
+      const routeGpxMatch = pathname.match(/^\/api\/routes\/([^/]+)\/gpx$/);
+      if (routeGpxMatch && req.method === 'GET') {
+        const routes = await readRoutes();
+        const route = routes.find((item) => item.id === routeGpxMatch[1]);
+        if (!route) {
+          sendJson(res, 404, { error: 'Route not found' });
+          return;
+        }
+        const gpx = routeToGpx(route);
+        res.writeHead(200, {
+          'Content-Type': 'application/gpx+xml; charset=utf-8',
+          'Content-Disposition': `attachment; filename="${route.id}.gpx"`,
+          'Access-Control-Allow-Origin': '*',
+        });
+        res.end(gpx);
+        return;
+      }
+
+      const routeMatch = pathname.match(/^\/api\/routes\/([^/]+)$/);
+      if (routeMatch) {
+        const id = routeMatch[1];
+        const routes = await readRoutes();
+        const index = routes.findIndex((item) => item.id === id);
+        if (index < 0) {
+          sendJson(res, 404, { error: 'Route not found' });
+          return;
+        }
+        if (req.method === 'GET') {
+          sendJson(res, 200, { route: routes[index] });
+          return;
+        }
+        if (req.method === 'DELETE') {
+          const [removed] = routes.splice(index, 1);
+          await writeRoutes(routes);
+          sendJson(res, 200, { deleted: removed.id });
+          return;
+        }
+      }
+
+      // 8. Static frontend files from public/
       let filePath = path.resolve(PUBLIC_DIR, '.' + (pathname === '/' ? '/index.html' : pathname));
       if (!filePath.startsWith(PUBLIC_DIR + path.sep) && filePath !== PUBLIC_DIR) {
         res.writeHead(403).end('Forbidden');
@@ -612,7 +995,7 @@ export function createTerrainServer() {
       res.end(data);
     } catch (err) {
       console.error('[terrain-lab] Request error:', err);
-      sendJson(res, 502, { error: err.message || 'Upstream Mars API failure' });
+      sendJson(res, err.statusCode || 502, { error: err.message || 'Upstream Mars API failure' });
     }
   });
 }

@@ -6,6 +6,7 @@ import {
   clampSpan,
   canvasPointToLatLon,
   latLonToCanvasPoint,
+  haversineKm,
 } from './mars-coords.js';
 
 const $ = (id) => document.getElementById(id);
@@ -39,6 +40,16 @@ const state = {
   hoverPoint: null,
   probePoint: null,
   requestEpoch: 0,
+  route: null,
+  routeWorld: null,
+  directWorld: null,
+  routeStats: null,
+  regionId: null,
+  surfaceRevision: 0,
+  pendingRouteId: null,
+  pendingRegionId: null,
+  showRoute: true,
+  showDirect: true,
 };
 
 // Parse incoming deep-link query params (?lat=...&lon=...&span=...&name=...&layer=...)
@@ -57,6 +68,8 @@ function readInitialParams() {
   if (q.has('layer')) {
     state.layer = q.get('layer');
   }
+  if (q.has('route')) state.pendingRouteId = q.get('route');
+  if (q.has('region')) state.pendingRegionId = q.get('region');
 }
 
 function formatCoord(lat, lon) {
@@ -86,6 +99,8 @@ function syncReturnLinks() {
     name: state.name,
     layer: state.layer,
   });
+  if (state.regionId) selfQ.set('region', state.regionId);
+  if (state.route?.id) selfQ.set('route', state.route.id);
   window.history.replaceState(null, '', `?${selfQ}`);
 
   $('active-target-label').textContent = `${state.name.toUpperCase()} · ${formatCoord(state.lat, state.lon)}`;
@@ -298,6 +313,8 @@ let terrainMesh = null;
 let skirtMesh = null;
 let sliceLine = null;
 let currentTexture = null;
+let routeGroup = null;
+let routeDirectLine = null;
 const textureLoader = new THREE.TextureLoader();
 
 // 3D Beacon synced with SVG elevation profile hover
@@ -354,10 +371,14 @@ function buildSkirtGeometry(positions, width, height, baseY = -2.2) {
   return geo;
 }
 
-function applyWorkerMesh({ positions, normals, uvs, indices, profile, stats, pins }, resetView = false) {
+function applyWorkerMesh({ positions, normals, uvs, indices, profile, stats, pins, route, direct }, resetView = false) {
   state.stats = stats;
   state.profile = profile;
   state.pins = pins;
+  state.routeWorld = route?.points?.length ? route.points : null;
+  state.directWorld = direct?.points?.length ? direct.points : null;
+  if (route?.stats) state.routeStats = route.stats;
+  if (state.route && !state.route.pointCount) state.route.pointCount = state.route.points?.length || 0;
   state.hasMesh = true;
 
   const geometry = new THREE.BufferGeometry();
@@ -427,14 +448,102 @@ function applyWorkerMesh({ positions, normals, uvs, indices, profile, stats, pin
   }
 
   rebuildPinElements();
+  updateRouteObjects();
   renderProfileSVG();
   renderTelemetry();
+  renderRoutePanel();
+  renderSurfaceMap();
 }
 
 // ============================================================================
 // 3. 3D Projected Feature Pins + Double-Click Surface Probe
 // ============================================================================
 let pinDomList = [];
+
+function routeVector(p) {
+  return new THREE.Vector3(p.worldX, p.worldY + 0.45, p.worldZ);
+}
+
+function disposeObject3D(root) {
+  root.traverse((obj) => {
+    obj.geometry?.dispose?.();
+    if (Array.isArray(obj.material)) obj.material.forEach((m) => m.dispose?.());
+    else obj.material?.dispose?.();
+  });
+}
+
+function updateRouteObjects() {
+  if (routeGroup) {
+    terrainGroup.remove(routeGroup);
+    disposeObject3D(routeGroup);
+    routeGroup = null;
+    routeDirectLine = null;
+  }
+  if (!state.routeWorld || state.routeWorld.length < 2) return;
+
+  routeGroup = new THREE.Group();
+  const points = state.routeWorld.map(routeVector);
+  const radius = Math.max(0.12, (state.stats?.meshWidth || 120) / 480);
+
+  if (points.length > 2) {
+    const curve = new THREE.CatmullRomCurve3(points, false, 'centripetal');
+    const tube = new THREE.Mesh(
+      new THREE.TubeGeometry(curve, Math.min(1600, points.length * 2), radius, 8, false),
+      new THREE.MeshBasicMaterial({ color: '#9dffcb' })
+    );
+    routeGroup.add(tube);
+  } else {
+    routeGroup.add(
+      new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(points),
+        new THREE.LineBasicMaterial({ color: '#9dffcb' })
+      )
+    );
+  }
+
+  if (state.directWorld && state.directWorld.length > 1) {
+    const directPoints = state.directWorld.map(routeVector);
+    const directGeo = new THREE.BufferGeometry().setFromPoints(directPoints);
+    routeDirectLine = new THREE.Line(
+      directGeo,
+      new THREE.LineDashedMaterial({
+        color: '#ef8c85',
+        dashSize: Math.max(0.4, radius * 7),
+        gapSize: Math.max(0.24, radius * 4),
+        transparent: true,
+        opacity: 0.9,
+      })
+    );
+    routeDirectLine.computeLineDistances();
+    routeDirectLine.visible = state.showDirect;
+    routeGroup.add(routeDirectLine);
+  }
+
+  const markerRadius = Math.max(0.7, radius * 4.5);
+  for (const [point, color] of [
+    [points[0], '#f0e6c8'],
+    [points[points.length - 1], '#ffdc7a'],
+  ]) {
+    const marker = new THREE.Mesh(
+      new THREE.SphereGeometry(markerRadius, 20, 20),
+      new THREE.MeshBasicMaterial({ color })
+    );
+    marker.position.copy(point);
+    routeGroup.add(marker);
+
+    const stem = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([
+        point.clone(),
+        point.clone().add(new THREE.Vector3(0, markerRadius * 6, 0)),
+      ]),
+      new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.7 })
+    );
+    routeGroup.add(stem);
+  }
+
+  routeGroup.visible = state.showRoute;
+  terrainGroup.add(routeGroup);
+}
 
 function rebuildPinElements() {
   pinsLayer.replaceChildren();
@@ -452,6 +561,20 @@ function rebuildPinElements() {
     };
     pinsLayer.appendChild(el);
     pinDomList.push({ el, pos: new THREE.Vector3(pin.worldX, pin.worldY + 1.2, pin.worldZ) });
+  }
+
+  if (state.routeWorld?.length > 1) {
+    const endpoints = [
+      { label: '① Старт', p: state.routeWorld[0], cls: 'route-start' },
+      { label: '② Цель', p: state.routeWorld[state.routeWorld.length - 1], cls: 'route-goal' },
+    ];
+    for (const { label, p, cls } of endpoints) {
+      const el = document.createElement('div');
+      el.className = `pin-3d route-pin ${cls}`;
+      el.innerHTML = `<span>${label} · ${p.elevM} m</span><i></i>`;
+      pinsLayer.appendChild(el);
+      pinDomList.push({ el, pos: new THREE.Vector3(p.worldX, p.worldY + 1.6, p.worldZ) });
+    }
   }
 }
 
@@ -588,7 +711,7 @@ function loadTextureAsync(url) {
   });
 }
 
-async function selectLocation(lat, lon, spanDeg = state.spanDeg, name = state.name) {
+async function selectLocation(lat, lon, spanDeg = state.spanDeg, name = state.name, options = {}) {
   state.lat = clampLat(lat, 86);
   state.lon = normalizeLon(lon);
   state.spanDeg = clampSpan(spanDeg);
@@ -596,6 +719,14 @@ async function selectLocation(lat, lon, spanDeg = state.spanDeg, name = state.na
   state.probePoint = null;
   $('surface-probe').hidden = true;
   beaconGroup.visible = false;
+
+  const regions = await getMissionRegions().catch(() => []);
+  const region = options.noRegion
+    ? null
+    : regions.find((item) => item.id === options.regionId) ||
+      (state.route ? findRegionContaining(regions, state.route.center || state.route.bounds) : null) ||
+      null;
+  state.regionId = region?.id || null;
 
   syncSpanSelectUI(state.spanDeg);
   syncReturnLinks();
@@ -607,50 +738,95 @@ async function selectLocation(lat, lon, spanDeg = state.spanDeg, name = state.na
   showLoading(
     true,
     `Загрузка участка «${state.name}»…`,
-    `NASA Mars Trek S16 DEM + USGS WMS (${state.layer.toUpperCase()})`
+    region ? `HiRISE DEM ${region.name} + ортофото` : `NASA Mars Trek S16 DEM + USGS WMS (${state.layer.toUpperCase()})`
   );
 
   try {
-    const q = new URLSearchParams({
-      lat: String(state.lat),
-      lon: String(state.lon),
-      span: String(state.spanDeg),
-      layer: state.layer,
-      grid: '257',
-    });
+    const cacheBust = state.surfaceRevision ? `&v=${state.surfaceRevision}` : '';
+    let meta;
+    let demBuf;
+    let width;
+    let height;
 
-    const metaRes = await fetch(`/api/terrain?${q}`);
-    if (!metaRes.ok) {
-      const errBody = await metaRes.json().catch(() => ({}));
-      throw new Error(errBody.error || `HTTP ${metaRes.status}`);
+    if (region) {
+      const demRes = await fetch(region.demUrl + (cacheBust ? `?v=${state.surfaceRevision}` : ''));
+      if (!demRes.ok) throw new Error(`Region DEM HTTP ${demRes.status}`);
+      width = Number(demRes.headers.get('X-Grid-Width'));
+      height = Number(demRes.headers.get('X-Grid-Height'));
+      if (!Number.isFinite(width) || !Number.isFinite(height)) throw new Error('Region DEM dimensions are missing');
+      demBuf = await demRes.arrayBuffer();
+      if (epoch !== state.requestEpoch) return;
+      meta = {
+        provider: 'hirise-local',
+        regionId: region.id,
+        gridSize: width,
+        gridHeight: height,
+        demType: 'float32',
+        bounds: region.bounds,
+        demUrl: region.demUrl,
+        textureUrl: region.surfaceUrl + (state.surfaceRevision ? `?v=${state.surfaceRevision}` : ''),
+        elevation: {
+          source: region.provenance?.title || region.name,
+          cached: demRes.headers.get('X-Cache') === 'HIT',
+        },
+        texture: {
+          layer: 'hirise',
+          layerName: region.name,
+          cached: false,
+        },
+        nearbyFeatures: nearbyFeaturesFor(region.bounds),
+      };
+    } else {
+      const q = new URLSearchParams({
+        lat: String(state.lat),
+        lon: String(state.lon),
+        span: String(state.spanDeg),
+        layer: state.layer,
+        grid: '257',
+      });
+      if (state.surfaceRevision) q.set('v', String(state.surfaceRevision));
+
+      const metaRes = await fetch(`/api/terrain?${q}`);
+      if (!metaRes.ok) {
+        const errBody = await metaRes.json().catch(() => ({}));
+        throw new Error(errBody.error || `HTTP ${metaRes.status}`);
+      }
+      meta = await metaRes.json();
+      if (epoch !== state.requestEpoch) return;
+
+      showLoading(true, 'Считывание матрицы высот и спутниковой текстуры…', 'Передача буфера в Web Worker');
+
+      const [buf, tex] = await Promise.all([
+        fetch(meta.demUrl).then((r) => {
+          if (!r.ok) throw new Error(`DEM HTTP ${r.status}`);
+          return r.arrayBuffer();
+        }),
+        loadTextureAsync(meta.textureUrl),
+      ]);
+      if (epoch !== state.requestEpoch) {
+        tex.dispose();
+        return;
+      }
+      demBuf = buf;
+      width = meta.gridSize;
+      height = meta.gridSize;
+      setCurrentTexture(tex);
     }
-    const meta = await metaRes.json();
-    if (epoch !== state.requestEpoch) return;
 
     state.terrainMeta = meta;
+    state.lat = meta.bounds ? Number(((meta.bounds.south + meta.bounds.north) / 2).toFixed(4)) : state.lat;
+    state.lon = meta.bounds ? Number(((meta.bounds.west + meta.bounds.east) / 2).toFixed(4)) : state.lon;
     draw2DMap();
+    syncReturnLinks();
 
-    showLoading(true, 'Считывание матрицы высот и спутниковой текстуры…', 'Передача буфера в Web Worker');
-
-    const [demBuf, tex] = await Promise.all([
-      fetch(meta.demUrl).then((r) => {
-        if (!r.ok) throw new Error(`DEM HTTP ${r.status}`);
-        return r.arrayBuffer();
-      }),
-      loadTextureAsync(meta.textureUrl),
-    ]);
-
-    if (epoch !== state.requestEpoch) {
-      tex.dispose();
-      return;
-    }
-
-    if (currentTexture) currentTexture.dispose();
-    currentTexture = tex;
-    if (terrainMesh) {
-      terrainMesh.material.map = currentTexture;
-      terrainMesh.material.color.set('#ffffff');
-      terrainMesh.material.needsUpdate = true;
+    if (region) {
+      showLoading(true, 'Загрузка ортофотографии HiRISE…', region.name);
+      const tex = await loadTextureAsync(meta.textureUrl).catch(() => null);
+      if (epoch !== state.requestEpoch) {
+        tex?.dispose();
+        return;
+      }
+      if (tex) setCurrentTexture(tex);
     }
 
     worker.postMessage(
@@ -658,12 +834,15 @@ async function selectLocation(lat, lon, spanDeg = state.spanDeg, name = state.na
         type: 'build',
         id: epoch,
         demBuffer: demBuf,
-        width: meta.gridSize,
-        height: meta.gridSize,
+        width,
+        height,
         bounds: meta.bounds,
+        demType: meta.demType || 'int16',
         verticalExaggeration: state.verticalExaggeration,
         profileMode: state.profileMode,
         nearbyFeatures: meta.nearbyFeatures || [],
+        routePoints: state.route?.points || null,
+        directPoints: state.route?.direct || null,
       },
       [demBuf]
     );
@@ -672,6 +851,97 @@ async function selectLocation(lat, lon, spanDeg = state.spanDeg, name = state.na
     showLoading(false);
     $('stat-source').textContent = `Ошибка загрузки: ${err.message}`;
   }
+}
+
+function setCurrentTexture(tex) {
+  if (currentTexture && currentTexture !== tex) currentTexture.dispose();
+  currentTexture = tex;
+  if (terrainMesh) {
+    terrainMesh.material.map = currentTexture;
+    terrainMesh.material.color.set('#ffffff');
+    terrainMesh.material.needsUpdate = true;
+  }
+  renderSurfaceMap();
+}
+
+let missionRegionsCache = null;
+
+async function getMissionRegions() {
+  if (missionRegionsCache) return missionRegionsCache;
+  const res = await fetch('/api/regions');
+  if (!res.ok) throw new Error(`Regions HTTP ${res.status}`);
+  const data = await res.json();
+  missionRegionsCache = data.regions || [];
+  return missionRegionsCache;
+}
+
+function findRegionContaining(regions, point) {
+  if (!point || !Number.isFinite(point.lat) || !Number.isFinite(point.lon)) return null;
+  return (
+    regions.find(
+      (region) =>
+        region.bounds &&
+        point.lon >= region.bounds.west &&
+        point.lon <= region.bounds.east &&
+        point.lat >= region.bounds.south &&
+        point.lat <= region.bounds.north
+    ) || null
+  );
+}
+
+function routeBounds(points) {
+  const lats = points.map((p) => p.lat);
+  const lons = points.map((p) => p.lon);
+  return {
+    west: Math.min(...lons),
+    east: Math.max(...lons),
+    south: Math.min(...lats),
+    north: Math.max(...lats),
+  };
+}
+
+function paddedSpanFromBounds(bounds) {
+  const width = Math.max(1e-4, bounds.east - bounds.west);
+  const height = Math.max(1e-4, bounds.north - bounds.south);
+  return clampSpan(Math.max(width, height) * 1.45);
+}
+
+function nearbyFeaturesFor(bounds) {
+  if (!bounds) return [];
+  const within = (p) =>
+    p.lon >= bounds.west && p.lon <= bounds.east && p.lat >= bounds.south && p.lat <= bounds.north;
+  const custom = (state.catalog.custom || []).filter(within);
+  const official = (state.catalog.official || []).filter(within).slice(0, 18);
+  return [...custom, ...official];
+}
+
+async function loadRouteById(id) {
+  const res = await fetch(`/api/routes/${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error(`Route HTTP ${res.status}`);
+  const data = await res.json();
+  return data.route;
+}
+
+function applyRoute(route) {
+  state.route = route || null;
+  state.routeWorld = null;
+  state.directWorld = null;
+  state.routeStats = null;
+  if (route) {
+    const bounds = route.bounds || routeBounds(route.points);
+    state.name = route.name || state.name;
+    state.lat = clampLat(route.center?.lat ?? (bounds.south + bounds.north) / 2, 86);
+    state.lon = normalizeLon(route.center?.lon ?? (bounds.west + bounds.east) / 2);
+    state.spanDeg = paddedSpanFromBounds(bounds);
+  }
+  renderRoutePanel();
+  renderSurfaceMap();
+  updateRouteObjects();
+}
+
+function clearRoute() {
+  applyRoute(null);
+  if (state.terrainMeta) triggerWorkerRecompute();
 }
 
 function triggerWorkerRecompute() {
@@ -684,6 +954,8 @@ function triggerWorkerRecompute() {
     verticalExaggeration: state.verticalExaggeration,
     profileMode: state.profileMode,
     nearbyFeatures: state.terrainMeta.nearbyFeatures || [],
+    routePoints: state.route?.points || null,
+    directPoints: state.route?.direct || null,
   });
 }
 
@@ -824,8 +1096,254 @@ function renderTelemetry() {
   $('stat-footprint').textContent = `${s.widthKm} × ${s.depthKm} км (${s.width}×${s.height})`;
   $('stat-slope').textContent = `${s.meanSlopeDeg}° сред · ${s.maxSlopeDeg}° макс`;
   $('stat-source').textContent =
-    `${m.elevation.source} · DEM ${m.elevation.cached ? 'CACHE HIT' : 'LIVE'} · TEX ${m.texture.cached ? 'CACHE HIT' : 'LIVE'}`;
+    `${m.elevation.source} · DEM ${m.elevation.cached ? 'CACHE HIT' : 'LIVE'} · TEX ${m.texture.cached ? 'CACHE HIT' : 'LIVE'}` +
+    (m.provider === 'hirise-local' ? ' · LTE провайдер: локальный HiRISE' : '');
 }
+
+// ============================================================================
+// 5b. GPS route panel + local 2D surface route map (updatable surface source)
+// ============================================================================
+const surfaceCanvas = $('surface-canvas');
+const surfaceCtx = surfaceCanvas.getContext('2d');
+
+function renderRoutePanel() {
+  const dock = $('route-dock');
+  const route = state.route;
+  if (!dock) return;
+  if (!route) {
+    dock.hidden = true;
+    return;
+  }
+  dock.hidden = false;
+  $('route-name').textContent = route.name;
+  const sourceBits = [route.source || 'ARES Safe Route Lab'];
+  if (route.region) sourceBits.push(route.region);
+  if (route.status) sourceBits.push(route.status);
+  $('route-source').textContent = sourceBits.join(' · ');
+  $('route-points').textContent = String(state.routeWorld?.length || route.points?.length || 0);
+
+  const s = state.routeStats;
+  $('route-distance').textContent = s ? `${s.lengthKm.toFixed(2)} км` : route.metrics?.oneWayKm ? `${route.metrics.oneWayKm.toFixed(2)} км` : '—';
+  $('route-ascent').textContent = s ? `${s.ascentM.toLocaleString('ru-RU')} м` : '—';
+  $('route-slope').textContent = s ? `${s.maxSlopeDeg.toFixed(1)}°` : route.metrics?.maxSlopeDeg ? `${route.metrics.maxSlopeDeg.toFixed(1)}°` : '—';
+  $('route-energy').textContent = route.metrics?.energy ? `${route.metrics.energy.toFixed(3)} кВт·ч` : '—';
+
+  const gpx = $('route-gpx');
+  if (gpx) gpx.href = route.id ? `/api/routes/${encodeURIComponent(route.id)}/gpx` : '#';
+}
+
+function surfaceXY(lat, lon) {
+  const b = state.terrainMeta?.bounds;
+  if (!b) return null;
+  return {
+    x: ((normalizeLon(lon) - b.west) / (b.east - b.west)) * surfaceCanvas.width,
+    y: ((b.north - lat) / (b.north - b.south)) * surfaceCanvas.height,
+  };
+}
+
+function surfaceLatLonFromXY(x, y) {
+  const b = state.terrainMeta?.bounds;
+  if (!b) return null;
+  return {
+    lat: b.north - (y / surfaceCanvas.height) * (b.north - b.south),
+    lon: normalizeLon(b.west + (x / surfaceCanvas.width) * (b.east - b.west)),
+  };
+}
+
+function drawSurfaceTrack(points, { color, width, dash = [], glow = true }) {
+  if (!points || points.length < 2) return;
+  surfaceCtx.save();
+  surfaceCtx.beginPath();
+  points.forEach((p, i) => {
+    const q = surfaceXY(p.lat, p.lon);
+    if (!q) return;
+    i ? surfaceCtx.lineTo(q.x, q.y) : surfaceCtx.moveTo(q.x, q.y);
+  });
+  if (glow) {
+    surfaceCtx.strokeStyle = 'rgba(3, 10, 16, 0.85)';
+    surfaceCtx.lineWidth = width + 4;
+    surfaceCtx.setLineDash([]);
+    surfaceCtx.stroke();
+  }
+  surfaceCtx.strokeStyle = color;
+  surfaceCtx.lineWidth = width;
+  surfaceCtx.setLineDash(dash);
+  surfaceCtx.stroke();
+  surfaceCtx.restore();
+}
+
+function drawSurfaceEndpoint(point, label, color) {
+  const q = surfaceXY(point.lat, point.lon);
+  if (!q) return;
+  surfaceCtx.beginPath();
+  surfaceCtx.arc(q.x, q.y, 11, 0, Math.PI * 2);
+  surfaceCtx.fillStyle = 'rgba(8, 18, 29, 0.9)';
+  surfaceCtx.fill();
+  surfaceCtx.lineWidth = 2.5;
+  surfaceCtx.strokeStyle = color;
+  surfaceCtx.stroke();
+  surfaceCtx.fillStyle = color;
+  surfaceCtx.font = 'bold 13px sans-serif';
+  surfaceCtx.textAlign = 'center';
+  surfaceCtx.textBaseline = 'middle';
+  surfaceCtx.fillText(label, q.x, q.y);
+}
+
+function renderSurfaceMap() {
+  if (!surfaceCanvas) return;
+  const w = surfaceCanvas.width;
+  const h = surfaceCanvas.height;
+  surfaceCtx.clearRect(0, 0, w, h);
+  surfaceCtx.fillStyle = '#0a141d';
+  surfaceCtx.fillRect(0, 0, w, h);
+
+  const image = currentTexture?.image;
+  if (image && (image.width || image.naturalWidth)) {
+    surfaceCtx.drawImage(image, 0, 0, w, h);
+  } else {
+    surfaceCtx.fillStyle = 'rgba(120, 90, 70, 0.35)';
+    surfaceCtx.fillRect(0, 0, w, h);
+  }
+
+  surfaceCtx.fillStyle = 'rgba(4, 10, 16, 0.12)';
+  surfaceCtx.fillRect(0, 0, w, h);
+
+  if (state.showDirect && state.directWorld) {
+    drawSurfaceTrack(state.directWorld, { color: '#ef8c85', width: 2, dash: [7, 6] });
+  }
+  if (state.showRoute && state.routeWorld) {
+    drawSurfaceTrack(state.routeWorld, { color: '#9dffcb', width: 3.5 });
+    drawSurfaceEndpoint(state.routeWorld[0], '①', '#f0e6c8');
+    drawSurfaceEndpoint(state.routeWorld[state.routeWorld.length - 1], '②', '#ffdc7a');
+  }
+
+  if (state.probePoint) {
+    const q = surfaceXY(state.probePoint.lat, state.probePoint.lon);
+    if (q) {
+      surfaceCtx.beginPath();
+      surfaceCtx.arc(q.x, q.y, 4.5, 0, Math.PI * 2);
+      surfaceCtx.fillStyle = '#7cd4a6';
+      surfaceCtx.fill();
+    }
+  }
+
+  const b = state.terrainMeta?.bounds;
+  if (b) {
+    const midLat = (b.south + b.north) / 2;
+    const spanKm = haversineKm({ lat: midLat, lon: b.west }, { lat: midLat, lon: b.east });
+    const barKm = spanKm > 20 ? 10 : spanKm > 6 ? 5 : 1;
+    const barPx = (barKm / spanKm) * w;
+    surfaceCtx.fillStyle = 'rgba(8, 18, 29, 0.82)';
+    surfaceCtx.fillRect(10, h - 30, barPx + 16, 20);
+    surfaceCtx.fillStyle = '#f2e7d3';
+    surfaceCtx.fillRect(18, h - 15, barPx, 2);
+    surfaceCtx.font = '11px monospace';
+    surfaceCtx.textAlign = 'left';
+    surfaceCtx.textBaseline = 'alphabetic';
+    surfaceCtx.fillText(barKm >= 1 ? `${barKm} км` : `${Math.round(barKm * 1000)} м`, 18, h - 19);
+  }
+
+  surfaceCtx.fillStyle = 'rgba(8, 18, 29, 0.8)';
+  surfaceCtx.fillRect(w - 34, 10, 24, 20);
+  surfaceCtx.fillStyle = '#f2e7d3';
+  surfaceCtx.font = 'bold 12px sans-serif';
+  surfaceCtx.textAlign = 'center';
+  surfaceCtx.fillText('N ↑', w - 22, 24);
+
+  const source = $('surface-source-label');
+  if (source) {
+    const m = state.terrainMeta;
+    source.textContent = m
+      ? m.provider === 'hirise-local'
+        ? `HiRISE · ${m.texture.layerName} · ${m.gridSize}×${m.gridHeight || m.gridSize}`
+        : `USGS/NASA · ${m.texture.layerName} · ${m.gridSize}×${m.gridSize}`
+      : 'Поверхность не загружена';
+  }
+}
+
+function downloadGpx() {
+  if (!state.route) return;
+  if (state.route.id) {
+    window.location.href = `/api/routes/${encodeURIComponent(state.route.id)}/gpx`;
+    return;
+  }
+  const esc = (v) => String(v ?? '').replace(/[<>&"']/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[c]));
+  const pts = (state.route.points || [])
+    .map((p) => `      <trkpt lat="${p.lat}" lon="${p.lon}">${Number.isFinite(p.elevM) ? `<ele>${p.elevM}</ele>` : ''}</trkpt>`)
+    .join('\n');
+  const gpx = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="ARES 3D Terrain Lab">\n  <trk><name>${esc(state.route.name)}</name><trkseg>\n${pts}\n  </trkseg></trk>\n</gpx>\n`;
+  const url = URL.createObjectURL(new Blob([gpx], { type: 'application/gpx+xml' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'ares-route.gpx';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+if (surfaceCanvas) {
+  surfaceCanvas.addEventListener('mousemove', (e) => {
+    const rect = surfaceCanvas.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * surfaceCanvas.width;
+    const y = ((e.clientY - rect.top) / rect.height) * surfaceCanvas.height;
+    const p = surfaceLatLonFromXY(x, y);
+    if (p) $('surface-hover-readout').textContent = formatCoord(p.lat, p.lon);
+  });
+  surfaceCanvas.addEventListener('mouseleave', () => {
+    $('surface-hover-readout').textContent = 'Клик по карте: замер · Двойной клик: центрировать 3D';
+  });
+  surfaceCanvas.addEventListener('click', (e) => {
+    const rect = surfaceCanvas.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * surfaceCanvas.width;
+    const y = ((e.clientY - rect.top) / rect.height) * surfaceCanvas.height;
+    const p = surfaceLatLonFromXY(x, y);
+    if (!p) return;
+    state.probePoint = { lat: p.lat, lon: p.lon, elevM: null };
+    $('probe-text').textContent = `Поверхность: ${formatCoord(p.lat, p.lon)}`;
+    $('surface-probe').hidden = false;
+    renderSurfaceMap();
+  });
+  surfaceCanvas.addEventListener('dblclick', async (e) => {
+    const rect = surfaceCanvas.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * surfaceCanvas.width;
+    const y = ((e.clientY - rect.top) / rect.height) * surfaceCanvas.height;
+    const p = surfaceLatLonFromXY(x, y);
+    if (p) await selectLocation(p.lat, p.lon, state.spanDeg, `Поверхность (${p.lat.toFixed(2)}°, ${p.lon.toFixed(2)}°)`);
+  });
+}
+
+$('surface-refresh')?.addEventListener('click', async () => {
+  const button = $('surface-refresh');
+  button.disabled = true;
+  button.textContent = 'Обновление…';
+  try {
+    const body = state.regionId ? { region: state.regionId } : { layer: state.layer };
+    const res = await fetch('/api/surface/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    state.surfaceRevision = Date.now();
+    missionRegionsCache = null;
+    await selectLocation(state.lat, state.lon, state.spanDeg, state.name);
+    $('surface-hover-readout').textContent = `Поверхность обновлена (${data.removed} файлов кеша)`;
+  } catch (err) {
+    $('surface-hover-readout').textContent = `Не удалось обновить: ${err.message}`;
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Обновить поверхность ↻';
+  }
+});
+
+$('route-gpx')?.addEventListener('click', (e) => {
+  if (!state.route?.id) {
+    e.preventDefault();
+    downloadGpx();
+  }
+});
+
+$('route-clear')?.addEventListener('click', () => clearRoute());
 
 // ============================================================================
 // 6. Catalog & Custom User Locations (GET / POST / DELETE /api/locations)
@@ -1011,12 +1529,14 @@ function syncSpanSelectUI(spanVal) {
 
 $('layer-select').onchange = (e) => {
   state.layer = e.target.value;
-  selectLocation(state.lat, state.lon, state.spanDeg, state.name);
+  state.regionId = null;
+  selectLocation(state.lat, state.lon, state.spanDeg, state.name, { noRegion: true });
 };
 
 $('span-select').onchange = (e) => {
   state.spanDeg = Number(e.target.value);
-  selectLocation(state.lat, state.lon, state.spanDeg, state.name);
+  state.regionId = null;
+  selectLocation(state.lat, state.lon, state.spanDeg, state.name, { noRegion: true });
 };
 
 $('exag-slider').oninput = (e) => {
@@ -1048,6 +1568,20 @@ $('toggle-wire').onclick = () => {
   $('toggle-wire').classList.toggle('active', state.wireframe);
   if (terrainMesh) terrainMesh.material.wireframe = state.wireframe;
 };
+
+$('toggle-route')?.addEventListener('click', () => {
+  state.showRoute = !state.showRoute;
+  $('toggle-route').classList.toggle('active', state.showRoute);
+  if (routeGroup) routeGroup.visible = state.showRoute;
+  renderSurfaceMap();
+});
+
+$('toggle-direct')?.addEventListener('click', () => {
+  state.showDirect = !state.showDirect;
+  $('toggle-direct').classList.toggle('active', state.showDirect);
+  if (routeDirectLine) routeDirectLine.visible = state.showDirect;
+  renderSurfaceMap();
+});
 
 $('reset-camera').onclick = () => {
   const maxY = (state.stats?.reliefM * state.stats?.elevScale) || 8;
@@ -1082,8 +1616,24 @@ async function init() {
   }
 
   syncReturnLinks();
-  loadLocationsCatalog();
-  await selectLocation(state.lat, state.lon, state.spanDeg, state.name);
+  await loadLocationsCatalog().catch(() => {});
+
+  if (state.pendingRouteId) {
+    try {
+      const route = await loadRouteById(state.pendingRouteId);
+      applyRoute(route);
+    } catch (err) {
+      console.warn('Route load failed:', err.message);
+      $('surface-hover-readout').textContent = `Маршрут недоступен: ${err.message}`;
+    }
+  }
+
+  const regions = await getMissionRegions().catch(() => []);
+  let regionId = state.pendingRegionId || null;
+  if (!regionId && state.route) {
+    regionId = findRegionContaining(regions, state.route.center)?.id || null;
+  }
+  await selectLocation(state.lat, state.lon, state.spanDeg, state.name, { regionId });
 }
 
 init();
