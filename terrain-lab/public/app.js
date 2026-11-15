@@ -45,11 +45,14 @@ const state = {
   directWorld: null,
   routeStats: null,
   regionId: null,
+  hiresItem: null,
+  autoHires: true,
   surfaceRevision: 0,
   pendingRouteId: null,
   pendingRegionId: null,
   showRoute: true,
   showDirect: true,
+  routeDockHidden: false,
 };
 
 // Parse incoming deep-link query params (?lat=...&lon=...&span=...&name=...&layer=...)
@@ -104,6 +107,7 @@ function syncReturnLinks() {
   window.history.replaceState(null, '', `?${selfQ}`);
 
   $('active-target-label').textContent = `${state.name.toUpperCase()} · ${formatCoord(state.lat, state.lon)}`;
+  renderStatus();
 }
 
 // ============================================================================
@@ -217,10 +221,12 @@ mapCanvas.addEventListener('mousemove', (e) => {
   const y = ((e.clientY - rect.top) / rect.height) * mapCanvas.height;
   const { lat, lon } = canvasPointToLatLon(x, y, mapCanvas.width, mapCanvas.height);
   $('canvas-hover-readout').textContent = formatCoord(lat, lon);
+  setInfoReadout(`${formatCoord(lat, lon)} · 2D MAP`);
 });
 
 mapCanvas.addEventListener('mouseleave', () => {
   $('canvas-hover-readout').textContent = formatCoord(state.lat, state.lon);
+  setInfoReadout(`${state.name} · ${formatCoord(state.lat, state.lon)}`);
 });
 
 mapCanvas.addEventListener('click', (e) => {
@@ -555,7 +561,7 @@ function rebuildPinElements() {
     el.type = 'button';
     el.className = `pin-3d ${pin.source === 'custom' ? 'custom' : ''}`;
     el.innerHTML = `<span>${escapeHtml(pin.name)} · ${pin.elevM} m</span><i></i>`;
-    el.title = `Перейти к ${pin.name} (${formatCoord(pin.lat, pin.lon)})`;
+    el.title = `Go to ${pin.name} (${formatCoord(pin.lat, pin.lon)})`;
     el.onclick = () => {
       selectLocation(pin.lat, pin.lon, pin.spanDeg || Math.max(1, state.spanDeg * 0.5), pin.name);
     };
@@ -565,8 +571,8 @@ function rebuildPinElements() {
 
   if (state.routeWorld?.length > 1) {
     const endpoints = [
-      { label: '① Старт', p: state.routeWorld[0], cls: 'route-start' },
-      { label: '② Цель', p: state.routeWorld[state.routeWorld.length - 1], cls: 'route-goal' },
+      { label: '① Start', p: state.routeWorld[0], cls: 'route-start' },
+      { label: '② Goal', p: state.routeWorld[state.routeWorld.length - 1], cls: 'route-goal' },
     ];
     for (const { label, p, cls } of endpoints) {
       const el = document.createElement('div');
@@ -625,8 +631,9 @@ renderer.domElement.addEventListener('dblclick', (e) => {
   const elevM = Math.round(minElevM + pt.y / Math.max(1e-6, elevScale));
 
   state.probePoint = { lat, lon, elevM };
-  $('probe-text').textContent = `Точка 3D: ${formatCoord(lat, lon)} · Высота ${elevM.toLocaleString('ru-RU')} м`;
+  $('probe-text').textContent = `3D point: ${formatCoord(lat, lon)} · Elevation ${elevM.toLocaleString('en-US')} m`;
   $('surface-probe').hidden = false;
+  setProbeInfo(`3D · ${formatCoord(lat, lon)} · ${elevM.toLocaleString('en-US')} m`);
 
   beaconGroup.position.set(pt.x, pt.y, pt.z);
   beaconGroup.visible = true;
@@ -642,13 +649,7 @@ $('probe-center-btn').onclick = () => {
   );
 };
 
-$('probe-form-btn').onclick = () => {
-  if (!state.probePoint) return;
-  $('custom-details').open = true;
-  $('custom-lat').value = state.probePoint.lat;
-  $('custom-lon').value = state.probePoint.lon;
-  $('custom-name').focus();
-};
+$('probe-form-btn').onclick = () => fillCustomFormFromProbe();
 
 // Resize handling
 function handleResize() {
@@ -679,7 +680,7 @@ worker.onmessage = ({ data }) => {
   if (data.id !== state.requestEpoch) return;
   if (data.type === 'error') {
     showLoading(false);
-    $('stat-source').textContent = `Ошибка воркера: ${data.message}`;
+    $('stat-source').textContent = `Worker error: ${data.message}`;
     return;
   }
   if (data.type === 'mesh') {
@@ -694,6 +695,12 @@ function showLoading(visible, title = '', sub = '') {
   el.hidden = !visible;
   if (title) $('loading-title').textContent = title;
   if (sub) $('loading-sub').textContent = sub;
+  const line = $('status-line');
+  if (line) {
+    line.textContent = visible
+      ? `LOADING · ${title || 'TERRAIN'}`
+      : `${state.name.toUpperCase()} · ${formatCoord(state.lat, state.lon)}`;
+  }
 }
 
 function loadTextureAsync(url) {
@@ -728,6 +735,12 @@ async function selectLocation(lat, lon, spanDeg = state.spanDeg, name = state.na
       null;
   state.regionId = region?.id || null;
 
+  let hiresItem = options.hiresItem || null;
+  if (!region && !hiresItem && options.noHires !== true && options.autoHires !== false && state.autoHires && state.spanDeg <= 1.0) {
+    hiresItem = await findBestHires(state.lat, state.lon, state.spanDeg, { minCoverage: 0.12 }).catch(() => null);
+  }
+  state.hiresItem = hiresItem || null;
+
   syncSpanSelectUI(state.spanDeg);
   syncReturnLinks();
   renderCatalog();
@@ -737,8 +750,12 @@ async function selectLocation(lat, lon, spanDeg = state.spanDeg, name = state.na
   state.hasMesh = false;
   showLoading(
     true,
-    `Загрузка участка «${state.name}»…`,
-    region ? `HiRISE DEM ${region.name} + ортофото` : `NASA Mars Trek S16 DEM + USGS WMS (${state.layer.toUpperCase()})`
+    `Loading site “${state.name}”…`,
+    region
+      ? `HiRISE DEM ${region.name} + orthoimage`
+      : hiresItem
+        ? `USGS STAC ${hiresItem.kind} DTM ${hiresItem.gsdM?.toFixed(1) || '?'} m/px`
+        : `NASA Mars Trek S16 DEM + USGS WMS (${state.layer.toUpperCase()})`
   );
 
   try {
@@ -776,7 +793,50 @@ async function selectLocation(lat, lon, spanDeg = state.spanDeg, name = state.na
         },
         nearbyFeatures: nearbyFeaturesFor(region.bounds),
       };
-    } else {
+    } else if (hiresItem) {
+      showLoading(true, 'Reading COG from USGS STAC…', 'HiRISE / CTX window + orthoimage');
+      try {
+        const q = new URLSearchParams({
+          collection: hiresItem.collection,
+          id: hiresItem.id,
+          lat: String(state.lat),
+          lon: String(state.lon),
+          span: String(state.spanDeg),
+          grid: '768',
+          textureSize: '1536',
+        });
+        if (state.surfaceRevision) q.set('v', String(state.surfaceRevision));
+        const metaRes = await fetch(`/api/hires/terrain?${q}`);
+        if (!metaRes.ok) {
+          const errBody = await metaRes.json().catch(() => ({}));
+          throw new Error(errBody.error || `Hi-res HTTP ${metaRes.status}`);
+        }
+        meta = await metaRes.json();
+        if (epoch !== state.requestEpoch) return;
+        const [buf, tex] = await Promise.all([
+          fetch(meta.demUrl).then((r) => {
+            if (!r.ok) throw new Error(`Hi-res DEM HTTP ${r.status}`);
+            return r.arrayBuffer();
+          }),
+          loadTextureAsync(meta.textureUrl),
+        ]);
+        if (epoch !== state.requestEpoch) {
+          tex.dispose();
+          return;
+        }
+        demBuf = buf;
+        width = meta.gridSize;
+        height = meta.gridHeight;
+        setCurrentTexture(tex);
+      } catch (err) {
+        console.warn('Hi-res STAC load failed, using global DEM:', err.message);
+        $('hires-status').textContent = `STAC unavailable: ${err.message}. Using the global 200 m DEM.`;
+        state.hiresItem = null;
+        meta = null;
+      }
+    }
+
+    if (!meta) {
       const q = new URLSearchParams({
         lat: String(state.lat),
         lon: String(state.lon),
@@ -794,7 +854,7 @@ async function selectLocation(lat, lon, spanDeg = state.spanDeg, name = state.na
       meta = await metaRes.json();
       if (epoch !== state.requestEpoch) return;
 
-      showLoading(true, 'Считывание матрицы высот и спутниковой текстуры…', 'Передача буфера в Web Worker');
+      showLoading(true, 'Reading the elevation matrix and orbital texture…', 'Transferring buffer to Web Worker');
 
       const [buf, tex] = await Promise.all([
         fetch(meta.demUrl).then((r) => {
@@ -816,11 +876,17 @@ async function selectLocation(lat, lon, spanDeg = state.spanDeg, name = state.na
     state.terrainMeta = meta;
     state.lat = meta.bounds ? Number(((meta.bounds.south + meta.bounds.north) / 2).toFixed(4)) : state.lat;
     state.lon = meta.bounds ? Number(((meta.bounds.west + meta.bounds.east) / 2).toFixed(4)) : state.lon;
+    if (meta.provider === 'stac-hires' && meta.bounds) {
+      state.spanDeg = clampSpan(
+        Math.max(meta.bounds.east - meta.bounds.west, meta.bounds.north - meta.bounds.south) * 1.15
+      );
+      syncSpanSelectUI(state.spanDeg);
+    }
     draw2DMap();
     syncReturnLinks();
 
     if (region) {
-      showLoading(true, 'Загрузка ортофотографии HiRISE…', region.name);
+      showLoading(true, 'Loading HiRISE orthoimage…', region.name);
       const tex = await loadTextureAsync(meta.textureUrl).catch(() => null);
       if (epoch !== state.requestEpoch) {
         tex?.dispose();
@@ -849,7 +915,7 @@ async function selectLocation(lat, lon, spanDeg = state.spanDeg, name = state.na
   } catch (err) {
     if (epoch !== state.requestEpoch) return;
     showLoading(false);
-    $('stat-source').textContent = `Ошибка загрузки: ${err.message}`;
+    $('stat-source').textContent = `Load error: ${err.message}`;
   }
 }
 
@@ -873,6 +939,24 @@ async function getMissionRegions() {
   const data = await res.json();
   missionRegionsCache = data.regions || [];
   return missionRegionsCache;
+}
+
+async function findBestHires(lat, lon, spanDeg, { force = false, minCoverage = 0.12 } = {}) {
+  const q = new URLSearchParams({
+    lat: String(lat),
+    lon: String(lon),
+    span: String(spanDeg),
+    limit: '16',
+  });
+  const res = await fetch(`/api/hires/search?${q}`, {
+    signal: AbortSignal.timeout(force ? 25000 : 4500),
+  });
+  if (!res.ok) throw new Error(`STAC search HTTP ${res.status}`);
+  const data = await res.json();
+  const candidates = data.candidates || [];
+  const best = force ? data.best : candidates.find((item) => item.coverage >= minCoverage && item.gsdM);
+  if (!best) return null;
+  return best;
 }
 
 function findRegionContaining(regions, point) {
@@ -927,6 +1011,7 @@ function applyRoute(route) {
   state.routeWorld = null;
   state.directWorld = null;
   state.routeStats = null;
+  state.routeDockHidden = false;
   if (route) {
     const bounds = route.bounds || routeBounds(route.points);
     state.name = route.name || state.name;
@@ -999,12 +1084,12 @@ function renderProfileSVG() {
 
   const midE = Math.round((minE + maxE) / 2);
   const modeLabels = {
-    ew: ['Запад (W)', 'Восток (E)', 'Разрез Запад → Восток через центр участка'],
-    ns: ['Север (N)', 'Юг (S)', 'Меридиональный разрез Север → Юг'],
-    diag: ['Юго-Запад (SW)', 'Северо-Восток (NE)', 'Диагональный разрез ЮЗ → СВ'],
+    ew: ['West (W)', 'East (E)', 'West → East section through the site center'],
+    ns: ['North (N)', 'South (S)', 'North → South meridian section'],
+    diag: ['South-West (SW)', 'North-East (NE)', 'SW → NE diagonal section'],
   };
   const [startLbl, endLbl, titleLbl] = modeLabels[state.profileMode] || modeLabels.ew;
-  $('profile-title').textContent = `${titleLbl} · ${maxDist.toFixed(1)} км`;
+  $('profile-title').textContent = `${titleLbl} · ${maxDist.toFixed(1)} km`;
 
   profileSvg.innerHTML = `
     <defs>
@@ -1017,13 +1102,13 @@ function renderProfileSVG() {
     <line x1="${padL}" y1="${padT + plotH / 2}" x2="${W - padR}" y2="${padT + plotH / 2}" stroke="#b8c8de18" stroke-dasharray="3,3"/>
     <line x1="${padL}" y1="${padT + plotH}" x2="${W - padR}" y2="${padT + plotH}" stroke="#b8c8de33"/>
 
-    <text x="${padL - 6}" y="${padT + 4}" fill="#93a5b8" font-size="9.5" font-family="monospace" text-anchor="end">${maxE} м</text>
-    <text x="${padL - 6}" y="${padT + plotH / 2 + 3}" fill="#74889d" font-size="9" font-family="monospace" text-anchor="end">${midE} м</text>
-    <text x="${padL - 6}" y="${padT + plotH + 3}" fill="#93a5b8" font-size="9.5" font-family="monospace" text-anchor="end">${minE} м</text>
+    <text x="${padL - 6}" y="${padT + 4}" fill="#93a5b8" font-size="9.5" font-family="monospace" text-anchor="end">${maxE} m</text>
+    <text x="${padL - 6}" y="${padT + plotH / 2 + 3}" fill="#74889d" font-size="9" font-family="monospace" text-anchor="end">${midE} m</text>
+    <text x="${padL - 6}" y="${padT + plotH + 3}" fill="#93a5b8" font-size="9.5" font-family="monospace" text-anchor="end">${minE} m</text>
 
-    <text x="${padL}" y="${H - 7}" fill="#9fb0c2" font-size="9.5" font-family="monospace">${startLbl} · 0 км</text>
-    <text x="${padL + plotW / 2}" y="${H - 7}" fill="#7f93a8" font-size="9.5" font-family="monospace" text-anchor="middle">${(maxDist / 2).toFixed(1)} км</text>
-    <text x="${W - padR}" y="${H - 7}" fill="#9fb0c2" font-size="9.5" font-family="monospace" text-anchor="end">${maxDist.toFixed(1)} км · ${endLbl}</text>
+    <text x="${padL}" y="${H - 7}" fill="#9fb0c2" font-size="9.5" font-family="monospace">${startLbl} · 0 km</text>
+    <text x="${padL + plotW / 2}" y="${H - 7}" fill="#7f93a8" font-size="9.5" font-family="monospace" text-anchor="middle">${(maxDist / 2).toFixed(1)} km</text>
+    <text x="${W - padR}" y="${H - 7}" fill="#9fb0c2" font-size="9.5" font-family="monospace" text-anchor="end">${maxDist.toFixed(1)} km · ${endLbl}</text>
 
     <path d="${areaCmd}" fill="url(#elevFill)"/>
     <path d="${lineCmd}" fill="none" stroke="#efd6ab" stroke-width="2"/>
@@ -1069,7 +1154,7 @@ profileSvg.addEventListener('mousemove', (e) => {
   }
 
   $('profile-hover-readout').textContent =
-    `${sample.distKm.toFixed(1)} км · Высота ${sample.elevM.toLocaleString('ru-RU')} м · Уклон ${sample.slopeDeg}° · (${sample.lat.toFixed(2)}°, ${sample.lon.toFixed(2)}°)`;
+    `${sample.distKm.toFixed(1)} km · Elevation ${sample.elevM.toLocaleString('en-US')} m · Slope ${sample.slopeDeg}° · (${sample.lat.toFixed(2)}°, ${sample.lon.toFixed(2)}°)`;
 
   beaconGroup.position.set(sample.worldX, sample.worldY, sample.worldZ);
   beaconGroup.visible = true;
@@ -1081,23 +1166,106 @@ profileSvg.addEventListener('mouseleave', () => {
   const cursor = $('svg-hover-cursor');
   if (cursor) cursor.setAttribute('visibility', 'hidden');
   $('profile-hover-readout').textContent =
-    'Наведите курсор на график для синхронизации с 3D-сценой';
+    'Hover the chart to sync with the 3D scene';
   if (!state.probePoint) beaconGroup.visible = false;
   draw2DMap();
 });
+
+function setInfoReadout(text) {
+  const el = $('info-readout');
+  if (el) el.textContent = text;
+  const hover = $('info-hover');
+  if (hover) hover.textContent = text;
+}
+
+function setProbeInfo(text) {
+  const el = $('info-probe');
+  if (el) el.textContent = text;
+}
+
+function renderStatus() {
+  const m = state.terrainMeta;
+  const s = state.stats;
+  const coords = formatCoord(state.lat, state.lon);
+  const target = $('active-target-label');
+  if (target) target.textContent = `${state.name.toUpperCase()} · ${coords}`;
+  const line = $('status-line');
+  if (line) line.textContent = `${state.name.toUpperCase()} · ${coords}`;
+  const targetPanel = $('status-target');
+  if (targetPanel) targetPanel.textContent = state.name;
+  const coordsPanel = $('status-coords');
+  if (coordsPanel) coordsPanel.textContent = coords;
+  const dem = $('status-dem');
+  if (dem) {
+    dem.textContent = m
+      ? `${m.elevation.source} · ${m.elevation.cached ? 'CACHE' : 'LIVE'}`
+      : '—';
+  }
+  const texture = $('status-texture');
+  if (texture) {
+    texture.textContent = m
+      ? `${m.texture.layerName} · ${m.texture.cached ? 'CACHE' : 'LIVE'}`
+      : '—';
+  }
+  const mesh = $('status-mesh');
+  if (mesh) {
+    mesh.textContent = s
+      ? `${s.width}×${s.height} · ${s.widthKm}×${s.depthKm} km · ${state.verticalExaggeration}×`
+      : '—';
+  }
+  const infoTarget = $('info-target');
+  if (infoTarget) infoTarget.textContent = `${state.name} · ${coords}`;
+  setInfoReadout(`${state.name} · ${coords}`);
+}
+
+function renderPlacesMenu() {
+  const menu = $('places-menu');
+  if (!menu) return;
+  const items = (state.catalog.featured || []).slice(0, 18);
+  menu.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement('p');
+    empty.className = 'hint-line';
+    empty.textContent = 'Popular places are still loading.';
+    menu.appendChild(empty);
+    return;
+  }
+  for (const item of items) {
+    const active = Math.hypot(item.lat - state.lat, item.lon - state.lon) < 0.25;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `place-item${active ? ' active' : ''}`;
+    button.innerHTML = `
+      <span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.type || 'Mars feature')}</small></span>
+      <em>${item.lat.toFixed(1)}°, ${item.lon.toFixed(1)}°</em>`;
+    button.onclick = async () => {
+      $('places-menu').hidden = true;
+      $('places-toggle').setAttribute('aria-expanded', 'false');
+      await selectLocation(item.lat, item.lon, item.spanDeg || 2.5, item.name);
+    };
+    menu.appendChild(button);
+  }
+}
 
 function renderTelemetry() {
   const s = state.stats;
   const m = state.terrainMeta;
   if (!s || !m) return;
 
-  $('stat-minmax').textContent = `${s.minElevM.toLocaleString('ru-RU')} м … ${s.maxElevM.toLocaleString('ru-RU')} м`;
-  $('stat-relief').textContent = `${s.reliefM.toLocaleString('ru-RU')} м (${state.verticalExaggeration}× верт.)`;
-  $('stat-footprint').textContent = `${s.widthKm} × ${s.depthKm} км (${s.width}×${s.height})`;
-  $('stat-slope').textContent = `${s.meanSlopeDeg}° сред · ${s.maxSlopeDeg}° макс`;
+  $('stat-minmax').textContent = `${s.minElevM.toLocaleString('en-US')} m … ${s.maxElevM.toLocaleString('en-US')} m`;
+  $('stat-relief').textContent = `${s.reliefM.toLocaleString('en-US')} m (${state.verticalExaggeration}× vertical)`;
+  $('stat-footprint').textContent = `${s.widthKm} × ${s.depthKm} km (${s.width}×${s.height})`;
+  $('stat-slope').textContent = `${s.meanSlopeDeg}° mean · ${s.maxSlopeDeg}° max`;
   $('stat-source').textContent =
     `${m.elevation.source} · DEM ${m.elevation.cached ? 'CACHE HIT' : 'LIVE'} · TEX ${m.texture.cached ? 'CACHE HIT' : 'LIVE'}` +
-    (m.provider === 'hirise-local' ? ' · LTE провайдер: локальный HiRISE' : '');
+    (m.provider === 'hirise-local' ? ' · provider: local HiRISE' : '') +
+    (m.provider === 'stac-hires' ? ` · USGS STAC · ${m.gsdM} m/px` : '');
+
+  const hiresStatus = $('hires-status');
+  if (hiresStatus && m.provider === 'stac-hires') {
+    hiresStatus.textContent = `${m.kind} · ${m.gsdM} m/px (source ${m.sourceGsdM?.toFixed(1) || '?'} m) · ${m.title}`;
+  }
+  renderStatus();
 }
 
 // ============================================================================
@@ -1110,7 +1278,7 @@ function renderRoutePanel() {
   const dock = $('route-dock');
   const route = state.route;
   if (!dock) return;
-  if (!route) {
+  if (!route || state.routeDockHidden) {
     dock.hidden = true;
     return;
   }
@@ -1123,10 +1291,10 @@ function renderRoutePanel() {
   $('route-points').textContent = String(state.routeWorld?.length || route.points?.length || 0);
 
   const s = state.routeStats;
-  $('route-distance').textContent = s ? `${s.lengthKm.toFixed(2)} км` : route.metrics?.oneWayKm ? `${route.metrics.oneWayKm.toFixed(2)} км` : '—';
-  $('route-ascent').textContent = s ? `${s.ascentM.toLocaleString('ru-RU')} м` : '—';
+  $('route-distance').textContent = s ? `${s.lengthKm.toFixed(2)} km` : route.metrics?.oneWayKm ? `${route.metrics.oneWayKm.toFixed(2)} km` : '—';
+  $('route-ascent').textContent = s ? `${s.ascentM.toLocaleString('en-US')} m` : '—';
   $('route-slope').textContent = s ? `${s.maxSlopeDeg.toFixed(1)}°` : route.metrics?.maxSlopeDeg ? `${route.metrics.maxSlopeDeg.toFixed(1)}°` : '—';
-  $('route-energy').textContent = route.metrics?.energy ? `${route.metrics.energy.toFixed(3)} кВт·ч` : '—';
+  $('route-energy').textContent = route.metrics?.energy ? `${route.metrics.energy.toFixed(3)} kWh` : '—';
 
   const gpx = $('route-gpx');
   if (gpx) gpx.href = route.id ? `/api/routes/${encodeURIComponent(route.id)}/gpx` : '#';
@@ -1240,7 +1408,7 @@ function renderSurfaceMap() {
     surfaceCtx.font = '11px monospace';
     surfaceCtx.textAlign = 'left';
     surfaceCtx.textBaseline = 'alphabetic';
-    surfaceCtx.fillText(barKm >= 1 ? `${barKm} км` : `${Math.round(barKm * 1000)} м`, 18, h - 19);
+    surfaceCtx.fillText(barKm >= 1 ? `${barKm} km` : `${Math.round(barKm * 1000)} m`, 18, h - 19);
   }
 
   surfaceCtx.fillStyle = 'rgba(8, 18, 29, 0.8)';
@@ -1256,8 +1424,10 @@ function renderSurfaceMap() {
     source.textContent = m
       ? m.provider === 'hirise-local'
         ? `HiRISE · ${m.texture.layerName} · ${m.gridSize}×${m.gridHeight || m.gridSize}`
-        : `USGS/NASA · ${m.texture.layerName} · ${m.gridSize}×${m.gridSize}`
-      : 'Поверхность не загружена';
+        : m.provider === 'stac-hires'
+          ? `${m.kind} STAC · ${m.gsdM} m/px · ${m.gridSize}²`
+          : `USGS/NASA · ${m.texture.layerName} · ${m.gridSize}×${m.gridSize}`
+      : 'Surface not loaded';
   }
 }
 
@@ -1286,10 +1456,14 @@ if (surfaceCanvas) {
     const x = ((e.clientX - rect.left) / rect.width) * surfaceCanvas.width;
     const y = ((e.clientY - rect.top) / rect.height) * surfaceCanvas.height;
     const p = surfaceLatLonFromXY(x, y);
-    if (p) $('surface-hover-readout').textContent = formatCoord(p.lat, p.lon);
+    if (p) {
+      $('surface-hover-readout').textContent = formatCoord(p.lat, p.lon);
+      setInfoReadout(`${formatCoord(p.lat, p.lon)} · SURFACE`);
+    }
   });
   surfaceCanvas.addEventListener('mouseleave', () => {
-    $('surface-hover-readout').textContent = 'Клик по карте: замер · Двойной клик: центрировать 3D';
+    $('surface-hover-readout').textContent = 'Click: probe · Double-click: center 3D';
+    setInfoReadout(`${state.name} · ${formatCoord(state.lat, state.lon)}`);
   });
   surfaceCanvas.addEventListener('click', (e) => {
     const rect = surfaceCanvas.getBoundingClientRect();
@@ -1298,8 +1472,9 @@ if (surfaceCanvas) {
     const p = surfaceLatLonFromXY(x, y);
     if (!p) return;
     state.probePoint = { lat: p.lat, lon: p.lon, elevM: null };
-    $('probe-text').textContent = `Поверхность: ${formatCoord(p.lat, p.lon)}`;
+    $('probe-text').textContent = `Surface: ${formatCoord(p.lat, p.lon)}`;
     $('surface-probe').hidden = false;
+    setProbeInfo(`Surface · ${formatCoord(p.lat, p.lon)}`);
     renderSurfaceMap();
   });
   surfaceCanvas.addEventListener('dblclick', async (e) => {
@@ -1307,16 +1482,17 @@ if (surfaceCanvas) {
     const x = ((e.clientX - rect.left) / rect.width) * surfaceCanvas.width;
     const y = ((e.clientY - rect.top) / rect.height) * surfaceCanvas.height;
     const p = surfaceLatLonFromXY(x, y);
-    if (p) await selectLocation(p.lat, p.lon, state.spanDeg, `Поверхность (${p.lat.toFixed(2)}°, ${p.lon.toFixed(2)}°)`);
+    if (p) await selectLocation(p.lat, p.lon, state.spanDeg, `Surface (${p.lat.toFixed(2)}°, ${p.lon.toFixed(2)}°)`);
   });
 }
 
 $('surface-refresh')?.addEventListener('click', async () => {
   const button = $('surface-refresh');
   button.disabled = true;
-  button.textContent = 'Обновление…';
+  button.textContent = 'Refreshing…';
   try {
-    const body = state.regionId ? { region: state.regionId } : { layer: state.layer };
+    const isHires = state.terrainMeta?.provider === 'stac-hires' && state.hiresItem;
+    const body = isHires ? { hires: true } : state.regionId ? { region: state.regionId } : { layer: state.layer };
     const res = await fetch('/api/surface/refresh', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1326,13 +1502,52 @@ $('surface-refresh')?.addEventListener('click', async () => {
     const data = await res.json();
     state.surfaceRevision = Date.now();
     missionRegionsCache = null;
-    await selectLocation(state.lat, state.lon, state.spanDeg, state.name);
-    $('surface-hover-readout').textContent = `Поверхность обновлена (${data.removed} файлов кеша)`;
+    await selectLocation(
+      state.lat,
+      state.lon,
+      state.spanDeg,
+      state.name,
+      isHires ? { hiresItem: state.hiresItem, noRegion: true } : { noRegion: true, noHires: true }
+    );
+    $('surface-hover-readout').textContent = `Surface refreshed (${data.removed} cache files)`;
   } catch (err) {
-    $('surface-hover-readout').textContent = `Не удалось обновить: ${err.message}`;
+    $('surface-hover-readout').textContent = `Refresh failed: ${err.message}`;
   } finally {
     button.disabled = false;
-    button.textContent = 'Обновить поверхность ↻';
+    button.textContent = 'Refresh surface ↻';
+  }
+});
+
+$('hires-load')?.addEventListener('click', async () => {
+  const button = $('hires-load');
+  const status = $('hires-status');
+  button.disabled = true;
+  status.textContent = 'Searching USGS STAC (HiRISE/CTX)…';
+  try {
+    const searchSpan = Math.min(state.spanDeg, 0.4);
+    const best = await findBestHires(state.lat, state.lon, searchSpan, { force: true });
+    if (!best) {
+      status.textContent = 'No HiRISE/CTX DTM found in USGS STAC for this area.';
+      return;
+    }
+    status.textContent = `${best.kind} ${best.gsdM?.toFixed(1) || '?'} m/px · coverage ${(best.coverage * 100).toFixed(0)}% · loading…`;
+    await selectLocation(
+      state.lat,
+      state.lon,
+      Math.max(state.spanDeg, searchSpan),
+      `${best.kind}: ${state.name}`,
+      { hiresItem: best, noRegion: true, autoHires: false }
+    );
+    const m = state.terrainMeta;
+    if (m?.provider === 'stac-hires') {
+      status.textContent = `${m.kind} · ${m.gsdM} m/px · ${m.gridSize}² · ${m.title}`;
+    } else {
+      status.textContent = 'Could not load the STAC DTM; keeping the global DEM.';
+    }
+  } catch (err) {
+    status.textContent = `STAC error: ${err.message}`;
+  } finally {
+    button.disabled = false;
   }
 });
 
@@ -1368,6 +1583,7 @@ async function loadLocationsCatalog() {
     $('official-count').textContent = String(state.catalog.totalOfficial);
 
     renderCatalog();
+    renderPlacesMenu();
     draw2DMap();
   } catch (err) {
     console.error('Failed to load locations catalog:', err);
@@ -1401,8 +1617,8 @@ function renderCatalog() {
     const empty = document.createElement('p');
     empty.className = 'hint-line';
     empty.textContent = tab === 'custom'
-      ? 'Пока нет сохранённых точек. Добавьте свою локацию выше или кликните по 2D-карте.'
-      : 'Ничего не найдено по фильтру.';
+      ? 'No saved points yet. Add a location above or click the 2D map.'
+      : 'No matches for this filter.';
     listEl.appendChild(empty);
     return;
   }
@@ -1415,7 +1631,7 @@ function renderCatalog() {
 
     const main = document.createElement('div');
     main.className = 'cat-main';
-    const diamText = item.diameterKm > 0 ? ` · ⌀ ${item.diameterKm} км` : '';
+    const diamText = item.diameterKm > 0 ? ` · ⌀ ${item.diameterKm} km` : '';
     main.innerHTML = `<strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.type)}${diamText}</small>`;
 
     const right = document.createElement('div');
@@ -1428,7 +1644,7 @@ function renderCatalog() {
       const del = document.createElement('button');
       del.type = 'button';
       del.className = 'del-btn';
-      del.title = 'Удалить точку';
+      del.title = 'Delete point';
       del.textContent = '×';
       del.onclick = async (ev) => {
         ev.stopPropagation();
@@ -1521,7 +1737,7 @@ function syncSpanSelectUI(spanVal) {
       sel.appendChild(dyn);
     }
     dyn.value = str;
-    dyn.textContent = `${Number(spanVal).toFixed(1)}° (~${Math.round(spanVal * 59.3)} км)`;
+    dyn.textContent = `${Number(spanVal).toFixed(1)}° (~${Math.round(spanVal * 59.3)} km)`;
     match = dyn;
   }
   sel.value = match.value;
@@ -1530,13 +1746,13 @@ function syncSpanSelectUI(spanVal) {
 $('layer-select').onchange = (e) => {
   state.layer = e.target.value;
   state.regionId = null;
-  selectLocation(state.lat, state.lon, state.spanDeg, state.name, { noRegion: true });
+  selectLocation(state.lat, state.lon, state.spanDeg, state.name, { noRegion: true, noHires: true });
 };
 
 $('span-select').onchange = (e) => {
   state.spanDeg = Number(e.target.value);
   state.regionId = null;
-  selectLocation(state.lat, state.lon, state.spanDeg, state.name, { noRegion: true });
+  selectLocation(state.lat, state.lon, state.spanDeg, state.name, { noRegion: true, noHires: true });
 };
 
 $('exag-slider').oninput = (e) => {
@@ -1601,6 +1817,112 @@ document.querySelectorAll('.slice-buttons button').forEach((btn) => {
 });
 
 // ============================================================================
+// 7b. New shell: top bar, menus, side panels and bottom dock
+// ============================================================================
+function closePopovers(except = null) {
+  for (const [btnId, menuId] of [
+    ['places-toggle', 'places-menu'],
+    ['layers-toggle', 'layers-menu'],
+    ['span-toggle', 'span-menu'],
+  ]) {
+    const menu = $(menuId);
+    const btn = $(btnId);
+    if (!menu || menu === except) continue;
+    menu.hidden = true;
+    btn?.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function bindPopover(btnId, menuId) {
+  const btn = $(btnId);
+  const menu = $(menuId);
+  if (!btn || !menu) return;
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const show = menu.hidden;
+    closePopovers(menu);
+    menu.hidden = !show;
+    btn.setAttribute('aria-expanded', String(show));
+  });
+}
+
+bindPopover('places-toggle', 'places-menu');
+bindPopover('layers-toggle', 'layers-menu');
+bindPopover('span-toggle', 'span-menu');
+
+function setPanel(btn, panel, show) {
+  if (!panel) return;
+  panel.hidden = !show;
+  btn?.setAttribute('aria-expanded', String(show));
+  btn?.classList.toggle('active', show);
+}
+
+function bindPanel(btnId, panelId, onShow) {
+  const btn = $(btnId);
+  const panel = $(panelId);
+  if (!btn || !panel) return;
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const show = panel.hidden;
+    setPanel(btn, panel, show);
+    if (show) onShow?.();
+  });
+}
+
+bindPanel('marks-toggle', 'marks-drawer', () => {
+  draw2DMap();
+  renderSurfaceMap();
+  renderCatalog();
+});
+bindPanel('status-toggle', 'status-panel', renderStatus);
+bindPanel('info-toggle', 'info-panel');
+
+$('marks-close')?.addEventListener('click', () => setPanel($('marks-toggle'), $('marks-drawer'), false));
+$('status-close')?.addEventListener('click', () => setPanel($('status-toggle'), $('status-panel'), false));
+
+const profileDock = $('profile-dock');
+$('profile-toggle')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const show = profileDock.hidden;
+  profileDock.hidden = !show;
+  $('profile-toggle').setAttribute('aria-expanded', String(show));
+  $('profile-toggle').classList.toggle('active', show);
+  if (show) renderProfileSVG();
+});
+$('profile-close')?.addEventListener('click', () => {
+  profileDock.hidden = true;
+  $('profile-toggle').setAttribute('aria-expanded', 'false');
+  $('profile-toggle').classList.remove('active');
+});
+$('route-close')?.addEventListener('click', () => {
+  state.routeDockHidden = true;
+  $('route-dock').hidden = true;
+});
+
+function fillCustomFormFromProbe() {
+  if (!state.probePoint) return;
+  setPanel($('marks-toggle'), $('marks-drawer'), true);
+  $('custom-details').open = true;
+  $('custom-lat').value = state.probePoint.lat;
+  $('custom-lon').value = state.probePoint.lon;
+  $('custom-name').focus();
+}
+
+$('info-form-btn')?.addEventListener('click', fillCustomFormFromProbe);
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.menu-anchor')) closePopovers();
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  closePopovers();
+  setPanel($('marks-toggle'), $('marks-drawer'), false);
+  setPanel($('status-toggle'), $('status-panel'), false);
+  setPanel($('info-toggle'), $('info-panel'), false);
+});
+
+// ============================================================================
 // 8. Initialization
 // ============================================================================
 async function init() {
@@ -1624,7 +1946,7 @@ async function init() {
       applyRoute(route);
     } catch (err) {
       console.warn('Route load failed:', err.message);
-      $('surface-hover-readout').textContent = `Маршрут недоступен: ${err.message}`;
+      $('surface-hover-readout').textContent = `Route unavailable: ${err.message}`;
     }
   }
 

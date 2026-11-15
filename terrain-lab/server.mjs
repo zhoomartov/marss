@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { PNG } from 'pngjs';
 import {
   normalizeLon,
   clampLat,
@@ -485,6 +486,401 @@ async function serveRegionImage(res, region) {
 }
 
 // ---------------------------------------------------------------------------
+// High-resolution local terrain from USGS Astrogeology STAC (HiRISE/CTX COGs).
+// NASA Trek gives a 200 m/px global DEM; STAC adds ~1 m HiRISE and ~20 m CTX
+// DTMs where coverage exists. The 3D mesh, worker and UI stay unchanged.
+// ---------------------------------------------------------------------------
+const STAC_API = process.env.STAC_API_URL || 'https://stac.astrogeology.usgs.gov/api';
+const HIRES_COLLECTIONS = ['mro_hirise_socet_dtms', 'mro_ctx_controlled_usgs_dtms'];
+const HIRES_COLLECTION_KIND = {
+  mro_hirise_socet_dtms: 'HiRISE',
+  mro_ctx_controlled_usgs_dtms: 'CTX',
+};
+const HIRES_RESULT_TTL_MS = 10 * 60 * 1000;
+const hiresSearchCache = new Map();
+const hiresItemCache = new Map();
+let nodeGeoTiffPromise = null;
+
+async function getNodeGeoTIFF() {
+  if (!nodeGeoTiffPromise) nodeGeoTiffPromise = import('geotiff');
+  return nodeGeoTiffPromise;
+}
+
+function latLonToProjected(lon, lat, projection = REGION_PROJECTION) {
+  const r = Number(projection.radius) || REGION_PROJECTION.radius;
+  const std = Number(projection.standardParallel) || 0;
+  const cLon = Number(projection.centralLongitude) || 0;
+  return {
+    x: (normalizeLon(lon) - cLon) * RAD * r * Math.cos(std * RAD),
+    y: Number(lat) * RAD * r,
+  };
+}
+
+export function intersectBounds(a, b) {
+  if (!a || !b) return null;
+  const west = Math.max(a.west, b.west);
+  const east = Math.min(a.east, b.east);
+  const south = Math.max(a.south, b.south);
+  const north = Math.min(a.north, b.north);
+  if (east <= west || north <= south) return null;
+  return { west, east, south, north };
+}
+
+function boundsArea(bounds) {
+  if (!bounds) return 0;
+  return Math.max(0, bounds.east - bounds.west) * Math.max(0, bounds.north - bounds.south);
+}
+
+function normalizeHiresFeature(feature) {
+  const collection = feature?.collection;
+  if (!HIRES_COLLECTIONS.includes(collection)) return null;
+  const assets = feature.assets || {};
+  const dtmUrl = assets.dtm?.href || assets.image?.href;
+  if (!dtmUrl) return null;
+  const bbox = Array.isArray(feature.bbox) && feature.bbox.length >= 4
+    ? { west: feature.bbox[0], south: feature.bbox[1], east: feature.bbox[2], north: feature.bbox[3] }
+    : null;
+  if (!bbox) return null;
+
+  let orthoKey = null;
+  if (collection === 'mro_hirise_socet_dtms') {
+    orthoKey = ['ortho_3', 'ortho_1', 'ortho_0', 'ortho_2'].find((key) => assets[key]?.href) || null;
+  } else {
+    orthoKey = ['orthoimage', 'image'].find((key) => assets[key]?.href) || null;
+  }
+  const thumbnailKey = Object.keys(assets).find((key) => /thumbnail/i.test(key) && /jpe?g|png/i.test(assets[key]?.type || ''));
+
+  return {
+    id: feature.id,
+    collection,
+    kind: HIRES_COLLECTION_KIND[collection],
+    title: feature.properties?.title || feature.id,
+    description: feature.properties?.description || '',
+    gsdM: Number(feature.properties?.gsd) || null,
+    datetime: feature.properties?.datetime || feature.properties?.start_datetime || null,
+    bbox,
+    dtmUrl,
+    orthoUrl: orthoKey ? assets[orthoKey].href : null,
+    orthoAsset: orthoKey,
+    thumbnailUrl: thumbnailKey ? assets[thumbnailKey].href : null,
+  };
+}
+
+export function rankHiresCandidates(candidates, requestedBounds) {
+  const ranked = candidates
+    .map((candidate) => {
+      const overlap = intersectBounds(candidate.bbox, requestedBounds);
+      const coverage = overlap && boundsArea(requestedBounds) > 0
+        ? boundsArea(overlap) / boundsArea(requestedBounds)
+        : 0;
+      return { ...candidate, coverage: Number(coverage.toFixed(4)) };
+    })
+    .filter((candidate) => candidate.coverage > 0);
+
+  // Resolution beats coverage as long as the high-res footprint actually
+  // intersects the view; tiny slivers fall back to the broader CTX product.
+  const strong = ranked
+    .filter((candidate) => candidate.coverage >= 0.1)
+    .sort((a, b) => (a.gsdM || 1e9) - (b.gsdM || 1e9) || b.coverage - a.coverage);
+  const weak = ranked
+    .filter((candidate) => candidate.coverage < 0.1)
+    .sort((a, b) => b.coverage - a.coverage || (a.gsdM || 1e9) - (b.gsdM || 1e9));
+  return [...strong, ...weak].map((candidate) => ({
+    ...candidate,
+    score: Number(((candidate.coverage >= 0.1 ? 100 : candidate.coverage * 10) + (candidate.gsdM ? Math.max(0, 30 - candidate.gsdM) : 0)).toFixed(3)),
+  }));
+}
+
+async function stacJson(url, options = {}, timeoutMs = 25000) {
+  const res = await fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
+  if (!res.ok) throw new Error(`STAC HTTP ${res.status}`);
+  return res.json();
+}
+
+async function searchHiresCandidates(bounds) {
+  const key = `${bounds.west.toFixed(5)},${bounds.south.toFixed(5)},${bounds.east.toFixed(5)},${bounds.north.toFixed(5)}`;
+  const cached = hiresSearchCache.get(key);
+  if (cached && Date.now() - cached.at < HIRES_RESULT_TTL_MS) return cached.candidates;
+
+  const body = {
+    collections: HIRES_COLLECTIONS,
+    bbox: [bounds.west, bounds.south, bounds.east, bounds.north],
+    limit: 50,
+  };
+  const data = await stacJson(`${STAC_API}/search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/geo+json' },
+    body: JSON.stringify(body),
+  });
+  const candidates = (data.features || []).map(normalizeHiresFeature).filter(Boolean);
+  hiresSearchCache.set(key, { at: Date.now(), candidates });
+  return candidates;
+}
+
+async function getHiresItem(collection, id) {
+  if (!HIRES_COLLECTIONS.includes(collection)) throw Object.assign(new Error('Unsupported STAC collection'), { statusCode: 400 });
+  const key = `${collection}/${id}`;
+  if (hiresItemCache.has(key)) return hiresItemCache.get(key);
+  const feature = await stacJson(`${STAC_API}/collections/${encodeURIComponent(collection)}/items/${encodeURIComponent(id)}`);
+  const item = normalizeHiresFeature({ ...feature, collection });
+  if (!item) throw Object.assign(new Error('STAC item has no usable DTM asset'), { statusCode: 502 });
+  hiresItemCache.set(key, item);
+  return item;
+}
+
+function bandRange(band) {
+  const step = Math.max(1, Math.floor(band.length / 24000));
+  const sample = [];
+  for (let i = 0; i < band.length; i += step) {
+    const v = Number(band[i]);
+    if (Number.isFinite(v)) sample.push(v);
+  }
+  if (!sample.length) return [0, 1];
+  sample.sort((a, b) => a - b);
+  const lo = sample[Math.floor(sample.length * 0.02)];
+  const hi = sample[Math.min(sample.length - 1, Math.floor(sample.length * 0.98))];
+  return hi > lo ? [lo, hi] : [sample[0], sample[sample.length - 1] || sample[0] + 1];
+}
+
+function encodeOrthoPng(rasters, width, height) {
+  const bands = Array.from(rasters || []);
+  if (!bands.length || !bands[0]?.length) return null;
+  const ranges = bands.slice(0, 3).map(bandRange);
+  const data = Buffer.alloc(width * height * 4);
+  const scale = (v, i) => {
+    const [lo, hi] = ranges[i] || ranges[0];
+    return Math.max(0, Math.min(255, Math.round(((Number(v) - lo) / Math.max(1e-9, hi - lo)) * 255)));
+  };
+  for (let p = 0; p < width * height; p++) {
+    let r;
+    let g;
+    let b;
+    if (bands.length >= 3) {
+      r = scale(bands[0][p], 0);
+      g = scale(bands[1][p], 1);
+      b = scale(bands[2][p], 2);
+    } else {
+      const v = scale(bands[0][p], 0);
+      r = v;
+      g = Math.round(v * 0.91);
+      b = Math.round(v * 0.78);
+    }
+    data[p * 4] = r;
+    data[p * 4 + 1] = g;
+    data[p * 4 + 2] = b;
+    data[p * 4 + 3] = 255;
+  }
+  return PNG.sync.write({ width, height, data }, { colorType: 6 });
+}
+
+function hillshadePng(values, width, height, bounds) {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const v of values) {
+    if (Number.isFinite(v)) {
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+  }
+  if (!Number.isFinite(min)) min = 0;
+  if (!Number.isFinite(max) || max <= min) max = min + 1;
+
+  const midLat = (bounds.south + bounds.north) / 2;
+  const dx = Math.max(1e-3, (bounds.east - bounds.west) * RAD * REGION_PROJECTION.radius * Math.cos(midLat * RAD) / width);
+  const dy = Math.max(1e-3, (bounds.north - bounds.south) * RAD * REGION_PROJECTION.radius / height);
+  const az = 315 * RAD;
+  const alt = 45 * RAD;
+  const lx = Math.cos(alt) * Math.sin(az);
+  const ly = Math.cos(alt) * Math.cos(az);
+  const lz = Math.sin(alt);
+  const zAt = (x, y) => {
+    const v = values[Math.max(0, Math.min(height - 1, y)) * width + Math.max(0, Math.min(width - 1, x))];
+    return Number.isFinite(v) ? v : min;
+  };
+
+  const data = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const dzdx = (zAt(x + 1, y) - zAt(x - 1, y)) / (2 * dx);
+      const dzdy = (zAt(x, y + 1) - zAt(x, y - 1)) / (2 * dy);
+      const inv = 1 / Math.hypot(dzdx, dzdy, 1);
+      const shade = Math.max(0, Math.min(1, (-dzdx * lx - dzdy * ly + lz) * inv));
+      const t = Math.max(0, Math.min(1, (zAt(x, y) - min) / (max - min)));
+      const warm = [58 + t * 170, 42 + t * 145, 32 + t * 120];
+      const light = 0.42 + shade * 0.72;
+      const p = (y * width + x) * 4;
+      data[p] = Math.min(255, warm[0] * light);
+      data[p + 1] = Math.min(255, warm[1] * light);
+      data[p + 2] = Math.min(255, warm[2] * light);
+      data[p + 3] = 255;
+    }
+  }
+  return PNG.sync.write({ width, height, data }, { colorType: 6 });
+}
+
+async function readCogWindow(url, projectedBbox, width, height, samples) {
+  const { fromUrl } = await getNodeGeoTIFF();
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const tiff = await fromUrl(url, {
+        blockSize: 262144,
+        cacheSize: 256,
+        maxRanges: 16,
+      });
+      const base = await tiff.getImage(0);
+      const imageBbox = base.getBoundingBox();
+      const bbox = [
+        Math.max(projectedBbox[0], imageBbox[0]),
+        Math.max(projectedBbox[1], imageBbox[1]),
+        Math.min(projectedBbox[2], imageBbox[2]),
+        Math.min(projectedBbox[3], imageBbox[3]),
+      ];
+      if (bbox[2] <= bbox[0] || bbox[3] <= bbox[1]) throw new Error('Requested window is outside the COG footprint');
+
+      const targetRes = (bbox[2] - bbox[0]) / width;
+      const imageCount = await tiff.getImageCount();
+      let chosen = base;
+      let chosenRes = 0;
+      let overviewIndex = 0;
+      for (let i = 0; i < imageCount; i++) {
+        const img = i === 0 ? base : await tiff.getImage(i);
+        const res = (imageBbox[2] - imageBbox[0]) / img.getWidth();
+        if (res <= targetRes * 1.05 && res >= chosenRes) {
+          chosen = img;
+          chosenRes = res;
+          overviewIndex = i;
+        }
+      }
+      if (!chosenRes) chosenRes = (imageBbox[2] - imageBbox[0]) / base.getWidth();
+
+      const imgWidth = chosen.getWidth();
+      const imgHeight = chosen.getHeight();
+      const spanX = imageBbox[2] - imageBbox[0];
+      const spanY = imageBbox[3] - imageBbox[1];
+      const x0 = Math.max(0, Math.min(imgWidth, Math.floor(((bbox[0] - imageBbox[0]) / spanX) * imgWidth)));
+      const x1 = Math.max(0, Math.min(imgWidth, Math.ceil(((bbox[2] - imageBbox[0]) / spanX) * imgWidth)));
+      const y0 = Math.max(0, Math.min(imgHeight, Math.floor(((imageBbox[3] - bbox[3]) / spanY) * imgHeight)));
+      const y1 = Math.max(0, Math.min(imgHeight, Math.ceil(((imageBbox[3] - bbox[1]) / spanY) * imgHeight)));
+      if (x1 <= x0 || y1 <= y0) throw new Error('Requested window has no overview pixels');
+
+      const rasters = await chosen.readRasters({
+        window: [x0, y0, x1, y1],
+        width,
+        height,
+        resampleMethod: 'bilinear',
+        ...(samples ? { samples } : {}),
+      });
+      return { rasters, image: chosen, bbox, resolution: chosenRes, overviewIndex };
+    } catch (err) {
+      lastError = err;
+      if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
+async function buildHiresTerrain(candidate, bounds, grid, textureSize) {
+  const sw = latLonToProjected(bounds.west, bounds.south);
+  const ne = latLonToProjected(bounds.east, bounds.north);
+  const projectedBbox = [sw.x, sw.y, ne.x, ne.y];
+
+  const dem = await readCogWindow(candidate.dtmUrl, projectedBbox, grid, grid);
+  const values = Float32Array.from(dem.rasters[0], (v) => (Number.isFinite(v) && v > -12000 ? v : NaN));
+  const actualBounds = latLonBoundsFromProjected(dem.bbox, REGION_PROJECTION);
+
+  let texture = null;
+  let textureSource = 'hillshade';
+  if (candidate.orthoUrl) {
+    try {
+      const ortho = await readCogWindow(candidate.orthoUrl, projectedBbox, textureSize, textureSize);
+      texture = encodeOrthoPng(ortho.rasters, textureSize, textureSize);
+      if (texture) textureSource = candidate.orthoAsset;
+    } catch {
+      // Grayscale/COG edge failures fall through to a DEM-derived hillshade.
+    }
+  }
+  if (!texture) texture = hillshadePng(values, grid, grid, actualBounds);
+
+  return {
+    values,
+    texture,
+    bounds: actualBounds,
+    grid,
+    gsdM: Number(((actualBounds.north - actualBounds.south) * RAD * REGION_PROJECTION.radius / grid).toFixed(3)),
+    sourceGsdM: Number(dem.resolution.toFixed(3)),
+    overviewIndex: dem.overviewIndex,
+    textureSource,
+  };
+}
+
+async function ensureHiresCached(candidate, bounds, grid, textureSize) {
+  await fs.mkdir(CACHE_DIR, { recursive: true });
+  const key = crypto
+    .createHash('sha1')
+    .update(`${candidate.collection}|${candidate.id}|${bounds.west},${bounds.south},${bounds.east},${bounds.north}|${grid}|${textureSize}`)
+    .digest('hex')
+    .slice(0, 20);
+  const binPath = path.join(CACHE_DIR, `hires_${key}.f32`);
+  const texPath = path.join(CACHE_DIR, `hires_${key}.png`);
+  const metaPath = path.join(CACHE_DIR, `hires_${key}.json`);
+
+  if (existsSync(binPath) && existsSync(texPath) && existsSync(metaPath)) {
+    const [bin, texture, metaRaw] = await Promise.all([
+      fs.readFile(binPath),
+      fs.readFile(texPath),
+      fs.readFile(metaPath, 'utf8'),
+    ]);
+    return { bin, texture, meta: JSON.parse(metaRaw), cached: true };
+  }
+
+  const built = await buildHiresTerrain(candidate, bounds, grid, textureSize);
+  const bin = Buffer.from(built.values.buffer, built.values.byteOffset, built.values.byteLength);
+  const meta = {
+    provider: 'stac-hires',
+    collection: candidate.collection,
+    itemId: candidate.id,
+    title: candidate.title,
+    kind: candidate.kind,
+    gsdM: built.gsdM,
+    sourceGsdM: built.sourceGsdM,
+    nativeGsdM: candidate.gsdM,
+    overviewIndex: built.overviewIndex,
+    bounds: built.bounds,
+    gridSize: grid,
+    gridHeight: grid,
+    demType: 'float32',
+    demUrl: `/api/hires/dem?key=${key}`,
+    textureUrl: `/api/hires/texture?key=${key}`,
+    iconUrl: candidate.thumbnailUrl,
+    sourceUrl: candidate.dtmUrl,
+    textureSource: built.textureSource,
+    datetime: candidate.datetime,
+    createdAt: new Date().toISOString(),
+  };
+  await Promise.all([
+    fs.writeFile(binPath, bin),
+    fs.writeFile(texPath, built.texture),
+    fs.writeFile(metaPath, JSON.stringify(meta, null, 2)),
+  ]);
+  return { bin, texture: built.texture, meta, cached: false };
+}
+
+async function readHiresCache(key) {
+  if (!/^[a-f0-9]{12,40}$/.test(String(key || ''))) throw Object.assign(new Error('Invalid cache key'), { statusCode: 400 });
+  const binPath = path.join(CACHE_DIR, `hires_${key}.f32`);
+  const texPath = path.join(CACHE_DIR, `hires_${key}.png`);
+  const metaPath = path.join(CACHE_DIR, `hires_${key}.json`);
+  if (!existsSync(binPath) || !existsSync(metaPath)) throw Object.assign(new Error('Hi-res terrain cache entry not found'), { statusCode: 404 });
+  const [bin, metaRaw, texture] = await Promise.all([
+    fs.readFile(binPath),
+    fs.readFile(metaPath, 'utf8'),
+    fs.readFile(texPath).catch(() => null),
+  ]);
+  return { bin, meta: JSON.parse(metaRaw), texture };
+}
+
+// ---------------------------------------------------------------------------
 // Route persistence (GPS tracks shared from the 2D Safe Route Lab).
 // ---------------------------------------------------------------------------
 
@@ -593,13 +989,14 @@ ${trackPoints}
 `;
 }
 
-async function clearSurfaceCache({ layer, region, all } = {}) {
+async function clearSurfaceCache({ layer, region, all, hires } = {}) {
   await fs.mkdir(CACHE_DIR, { recursive: true });
   const files = await fs.readdir(CACHE_DIR);
   let removed = 0;
   for (const name of files) {
     let match = false;
     if (all) match = true;
+    else if (hires) match = name.startsWith('hires_');
     else if (region) match = name.startsWith(`region_${region}_`);
     else if (layer) match = name.startsWith(`tex_${layer}_`);
     if (!match) continue;
@@ -880,6 +1277,102 @@ export function createTerrainServer() {
         return;
       }
 
+      // 6b. USGS STAC high-resolution DTM discovery + COG windows (HiRISE/CTX)
+      if (pathname === '/api/hires/search' && req.method === 'GET') {
+        const lat = Number(url.searchParams.get('lat'));
+        const lon = Number(url.searchParams.get('lon'));
+        const span = Number(url.searchParams.get('span') || 0.3);
+        const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit') || 24)));
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+          sendJson(res, 400, { error: 'Valid numeric lat and lon query params are required' });
+          return;
+        }
+        const requested = computeTerrainBounds(clampLat(lat, 86), normalizeLon(lon), clampSpan(span));
+        const candidates = rankHiresCandidates(await searchHiresCandidates(requested), requested).slice(0, limit);
+        sendJson(res, 200, {
+          requested,
+          best: candidates[0] || null,
+          candidates,
+          collections: HIRES_COLLECTIONS,
+          provider: 'usgs-stac-hires',
+        });
+        return;
+      }
+
+      if (pathname === '/api/hires/terrain' && req.method === 'GET') {
+        const collection = String(url.searchParams.get('collection') || '');
+        const id = String(url.searchParams.get('id') || '');
+        const lat = Number(url.searchParams.get('lat'));
+        const lon = Number(url.searchParams.get('lon'));
+        const span = Number(url.searchParams.get('span') || 0.3);
+        const grid = Math.min(1024, Math.max(128, Number(url.searchParams.get('grid') || 512)));
+        const textureSize = Math.min(2048, Math.max(256, Number(url.searchParams.get('textureSize') || 1024)));
+        if (!collection || !id || !Number.isFinite(lat) || !Number.isFinite(lon)) {
+          sendJson(res, 400, { error: 'collection, id, lat and lon are required' });
+          return;
+        }
+        const item = await getHiresItem(collection, id);
+        const requested = computeTerrainBounds(clampLat(lat, 86), normalizeLon(lon), clampSpan(span));
+        const bounds = intersectBounds(requested, item.bbox);
+        if (!bounds) {
+          sendJson(res, 404, { error: 'Requested view does not overlap this STAC DTM' });
+          return;
+        }
+        const { meta, cached } = await ensureHiresCached(item, bounds, grid, textureSize);
+        const [official, custom] = await Promise.all([ensureOfficialCatalog(), readCustomLocations()]);
+        const inBounds = (feature) =>
+          feature.lon >= meta.bounds.west &&
+          feature.lon <= meta.bounds.east &&
+          feature.lat >= meta.bounds.south &&
+          feature.lat <= meta.bounds.north;
+        sendJson(res, 200, {
+          ...meta,
+          elevation: {
+            source: `${item.kind} DTM · ${item.title}`,
+            cached,
+            gsdM: item.gsdM,
+          },
+          texture: {
+            layer: 'stac',
+            layerName: `${item.kind} ${meta.textureSource || 'ortho'}`,
+            cached,
+          },
+          nearbyFeatures: [...custom.filter(inBounds), ...official.filter(inBounds)].slice(0, 20),
+        });
+        return;
+      }
+
+      if (pathname === '/api/hires/dem' && req.method === 'GET') {
+        const { bin, meta } = await readHiresCache(url.searchParams.get('key'));
+        res.writeHead(200, {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': bin.byteLength,
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Expose-Headers': 'X-Grid-Width, X-Grid-Height',
+          'X-Grid-Width': String(meta.gridSize),
+          'X-Grid-Height': String(meta.gridHeight),
+          'Cache-Control': 'no-store',
+        });
+        res.end(bin);
+        return;
+      }
+
+      if (pathname === '/api/hires/texture' && req.method === 'GET') {
+        const { texture } = await readHiresCache(url.searchParams.get('key'));
+        if (!texture) {
+          sendJson(res, 404, { error: 'Hi-res texture not available' });
+          return;
+        }
+        res.writeHead(200, {
+          'Content-Type': 'image/png',
+          'Content-Length': texture.byteLength,
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-store',
+        });
+        res.end(texture);
+        return;
+      }
+
       if (pathname === '/api/surface' && req.method === 'GET') {
         const regions = await listMissionRegions();
         sendJson(res, 200, {
@@ -897,6 +1390,7 @@ export function createTerrainServer() {
             demUrl: region.demUrl,
             demType: region.demType,
           })),
+          stacProviders: ['usgs-stac-hires'],
         });
         return;
       }
@@ -906,6 +1400,7 @@ export function createTerrainServer() {
         const removed = await clearSurfaceCache({
           layer: body.layer ? String(body.layer).slice(0, 40) : undefined,
           region: body.region ? String(body.region).slice(0, 80) : undefined,
+          hires: Boolean(body.hires),
           all: Boolean(body.all),
         });
         sendJson(res, 200, { refreshed: true, removed });

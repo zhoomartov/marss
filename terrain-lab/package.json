@@ -8,5 +8,9 @@
     "start": "node server.mjs",
     "check": "node --check server.mjs && node --check public/mars-coords.js && node --check public/terrain-worker.js && node --check public/app.js",
     "test": "node --test terrain.test.mjs"
+  },
+  "dependencies": {
+    "geotiff": "^3.0.5",
+    "pngjs": "^7.0.0"
   }
 }

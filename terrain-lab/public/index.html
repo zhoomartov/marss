@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#050a10">
+  <meta name="theme-color" content="#080a0c">
   <title>ARES — 3D Terrain Lab · Mars Digital Elevation Explorer</title>
   <link rel="stylesheet" href="style.css">
   <script type="importmap">
@@ -16,130 +16,196 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand-wrap">
+    <button type="button" id="marks-toggle" class="top-link" aria-expanded="false">marks</button>
+
+    <div class="menu-anchor">
+      <button type="button" id="places-toggle" class="top-link" aria-expanded="false">popular places:</button>
+      <div id="places-menu" class="menu places-menu" hidden></div>
+    </div>
+
+    <div class="top-center">
       <a class="brand" id="atlas-home-link" href="http://127.0.0.1:4173/#mars">
         <span class="brand-mark">△</span>
         <span>ARES</span>
-        <small>3D TERRAIN LAB<br>ADDON MODULE</small>
+        <small>3D TERRAIN LAB</small>
       </a>
-      <div class="target-pill">
-        <i class="pulse-dot"></i>
-        <span id="active-target-label">MARS · LOADING TERRAIN…</span>
-      </div>
     </div>
 
-    <nav class="topnav">
-      <a id="open-in-atlas-map" href="http://127.0.0.1:4173/#map" class="nav-btn accent">Surface Atlas ↗</a>
-      <a id="open-in-atlas-globe" href="http://127.0.0.1:4173/#mars" class="nav-btn">Mars Globe ↗</a>
-      <a id="open-in-rover" href="http://127.0.0.1:4173/rover.html" class="nav-btn">Safe Route Lab ↗</a>
-    </nav>
+    <button type="button" id="reset-camera" class="top-link">reset camera</button>
   </header>
 
-  <main class="layout">
-    <!-- Left Column: 2D Canvas Map, Custom Point Form & 1,929-Object Mars Catalog -->
-    <aside class="sidebar">
-      <section class="panel-block map2d-block">
-        <div class="block-head">
-          <div>
-            <div class="eyebrow">01 / GLOBAL 2D CANVAS</div>
-            <h2>Click anywhere on Mars</h2>
-          </div>
-          <span class="coord-hover" id="canvas-hover-readout">—</span>
-        </div>
-        <div class="canvas-frame">
-          <canvas id="mars-canvas" width="720" height="360" aria-label="Interactive 2D Mars equirectangular map"></canvas>
-          <div class="canvas-compass">90°N · −180°..+180°E</div>
-        </div>
-        <p class="hint-line">Клик по 2D-карте переводит (x, y) → (lat, lon), строит 3D-меш и обновляет профиль высот.</p>
-      </section>
+  <main class="workspace">
+    <section class="viewer" id="viewport-wrap">
+      <div id="three-container" class="three-container" tabindex="0" aria-label="Interactive 3D Mars terrain mesh"></div>
+      <div id="pins-layer" class="pins-layer"></div>
 
-      <section class="panel-block surface-block">
-        <div class="block-head">
-          <div>
-            <div class="eyebrow">02 / SURFACE ROUTE MAP</div>
-            <h2>2D-поверхность + GPS</h2>
-          </div>
-          <span class="coord-hover" id="surface-hover-readout">Клик по карте: замер · Двойной клик: центрировать 3D</span>
-        </div>
-        <div class="canvas-frame surface-frame">
-          <canvas id="surface-canvas" width="720" height="480" aria-label="2D surface map with GPS route overlay"></canvas>
-          <div class="canvas-compass" id="surface-source-label">Поверхность не загружена</div>
-        </div>
-        <div class="surface-actions">
-          <button type="button" id="surface-refresh" class="ghost-btn">Обновить поверхность ↻</button>
-          <span class="hint-line">Провайдер обновляем: глобальные WMS-слои или локальные HiRISE-зоны из mission-regions.json.</span>
-        </div>
-      </section>
+      <div class="status-corner">
+        <button type="button" id="status-toggle" class="corner-btn" aria-expanded="false">status:</button>
+        <span id="status-line">MARS · INIT</span>
+      </div>
 
-      <section class="panel-block custom-block">
-        <details id="custom-details" open>
-          <summary>
-            <span class="eyebrow">02 / СВОЯ ТОЧКА МАРСА</span>
-            <strong>Добавить локацию по координатам</strong>
-          </summary>
-          <form id="custom-form" class="custom-form">
-            <label class="field full">
-              Название точки
-              <input id="custom-name" name="name" type="text" placeholder="Напр.: База Арес-3" maxlength="80" required>
-            </label>
-            <label class="field">
-              Широта (lat, °N)
-              <input id="custom-lat" name="lat" type="number" step="any" min="-86" max="86" placeholder="31.2" required>
-            </label>
-            <label class="field">
-              Долгота (−180..180 / 0..360)
-              <input id="custom-lon" name="lon" type="number" step="any" min="-180" max="360" placeholder="-28.5" required>
-            </label>
-            <label class="field">
-              Участок (span, °)
-              <input id="custom-span" name="spanDeg" type="number" step="0.1" min="0.25" max="20" value="2.5" required>
-            </label>
-            <label class="field">
-              Тип
-              <input id="custom-type" name="type" type="text" value="Custom waypoint" maxlength="40">
-            </label>
-            <div class="form-actions full">
-              <button type="button" id="preview-coords-btn" class="ghost-btn">Открыть без сохранения</button>
-              <button type="submit" class="primary-btn">Сохранить и 3D ↗</button>
+      <aside id="status-panel" class="side-panel status-panel" hidden>
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">status:</span>
+            <h2>Scene status</h2>
+          </div>
+          <button type="button" class="panel-close" id="status-close" aria-label="Close status">×</button>
+        </div>
+        <div class="panel-scroll">
+          <dl class="status-grid">
+            <div><dt>TARGET</dt><dd id="status-target">—</dd></div>
+            <div><dt>COORDINATES</dt><dd id="status-coords">—</dd></div>
+            <div><dt>DEM</dt><dd id="status-dem">—</dd></div>
+            <div><dt>TEXTURE</dt><dd id="status-texture">—</dd></div>
+            <div><dt>MESH</dt><dd id="status-mesh">—</dd></div>
+            <div class="wide"><dt>USGS STAC</dt><dd id="hires-status">Local DTMs: HiRISE ~1 m/px and CTX ~20 m/px where coverage exists.</dd></div>
+          </dl>
+          <nav class="panel-nav" aria-label="Related modules">
+            <a id="open-in-atlas-map" href="http://127.0.0.1:4173/#map">Surface Atlas ↗</a>
+            <a id="open-in-atlas-globe" href="http://127.0.0.1:4173/#mars">Mars Globe ↗</a>
+            <a id="open-in-rover" href="http://127.0.0.1:4173/rover.html">Safe Route Lab ↗</a>
+          </nav>
+          <p class="hint-line">
+            LMB: orbit · RMB: pan · wheel: zoom · double-click terrain: elevation probe.
+          </p>
+        </div>
+      </aside>
+
+      <aside id="marks-drawer" class="side-panel marks-panel" hidden>
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">marks</span>
+            <h2>Marks, places and surface</h2>
+          </div>
+          <button type="button" class="panel-close" id="marks-close" aria-label="Close marks">×</button>
+        </div>
+        <div class="panel-scroll">
+          <section class="panel-section">
+            <div class="section-head">
+              <span class="eyebrow">01 / GLOBAL 2D CANVAS</span>
+              <span class="coord-hover" id="canvas-hover-readout">—</span>
             </div>
-          </form>
-        </details>
-      </section>
+            <div class="canvas-frame">
+              <canvas id="mars-canvas" width="720" height="360" aria-label="Interactive 2D Mars equirectangular map"></canvas>
+              <div class="canvas-compass">90°N · −180°..+180°E</div>
+            </div>
+            <p class="hint-line">Click the 2D map to convert (x, y) → (lat, lon), rebuild the 3D mesh and refresh the elevation profile.</p>
+          </section>
 
-      <section class="panel-block catalog-block">
-        <div class="eyebrow">03 / КАТАЛОГ ОБЪЕКТОВ МАРСА</div>
-        <div class="catalog-tabs" role="tablist">
-          <button type="button" data-tab="featured" class="active">Топ-регионы</button>
-          <button type="button" data-tab="custom">Мои точки (<span id="custom-count">0</span>)</button>
-          <button type="button" data-tab="official">USGS (<span id="official-count">…</span>)</button>
+          <section class="panel-section">
+            <div class="section-head">
+              <span class="eyebrow">02 / SURFACE ROUTE MAP</span>
+              <span class="coord-hover" id="surface-hover-readout">Click: probe · Double-click: center</span>
+            </div>
+            <div class="canvas-frame surface-frame">
+              <canvas id="surface-canvas" width="720" height="480" aria-label="2D surface map with GPS route overlay"></canvas>
+              <div class="canvas-compass" id="surface-source-label">Surface not loaded</div>
+            </div>
+            <div class="surface-actions">
+              <button type="button" id="surface-refresh" class="ghost-btn">Refresh surface ↻</button>
+              <button type="button" id="hires-load" class="ghost-btn">Load HiRISE/CTX from USGS STAC ⤢</button>
+            </div>
+          </section>
+
+          <section class="panel-section">
+            <details id="custom-details">
+              <summary>
+                <span class="eyebrow">03 / CUSTOM MARS POINT</span>
+                <strong>Add a location by coordinates</strong>
+              </summary>
+              <form id="custom-form" class="custom-form">
+                <label class="field full">
+                  Location name
+                  <input id="custom-name" name="name" type="text" placeholder="e.g. Ares-3 Base" maxlength="80" required>
+                </label>
+                <label class="field">
+                  Latitude (lat, °N)
+                  <input id="custom-lat" name="lat" type="number" step="any" min="-86" max="86" placeholder="31.2" required>
+                </label>
+                <label class="field">
+                  Longitude (−180..180 / 0..360)
+                  <input id="custom-lon" name="lon" type="number" step="any" min="-180" max="360" placeholder="-28.5" required>
+                </label>
+                <label class="field">
+                  Span (°)
+                  <input id="custom-span" name="spanDeg" type="number" step="0.01" min="0.01" max="20" value="2.5" required>
+                </label>
+                <label class="field">
+                  Type
+                  <input id="custom-type" name="type" type="text" value="Custom waypoint" maxlength="40">
+                </label>
+                <div class="form-actions full">
+                  <button type="button" id="preview-coords-btn" class="ghost-btn">Preview without saving</button>
+                  <button type="submit" class="primary-btn">Save and open 3D ↗</button>
+                </div>
+              </form>
+            </details>
+          </section>
+
+          <section class="panel-section catalog-section">
+            <div class="section-head">
+              <span class="eyebrow">04 / MARS OBJECT CATALOG</span>
+            </div>
+            <div class="catalog-tabs" role="tablist">
+              <button type="button" data-tab="featured" class="active">Top regions</button>
+              <button type="button" data-tab="custom">My points (<span id="custom-count">0</span>)</button>
+              <button type="button" data-tab="official">USGS (<span id="official-count">…</span>)</button>
+            </div>
+            <div class="catalog-filters" id="catalog-filters" hidden>
+              <input id="catalog-search" type="search" placeholder="Search: Olympus, Jezero, Gale, Vallis…">
+              <select id="catalog-type" aria-label="Filter by object type">
+                <option value="">All types</option>
+                <option value="crater">Craters</option>
+                <option value="mons">Mountains (Mons / Montes)</option>
+                <option value="vallis">Valleys (Vallis / Valles)</option>
+                <option value="planitia">Plains (Planitia)</option>
+                <option value="fossa">Troughs / Canyons (Fossa / Chasma)</option>
+              </select>
+            </div>
+            <div id="catalog-list" class="catalog-list" role="list"></div>
+          </section>
         </div>
-        <div class="catalog-filters" id="catalog-filters" hidden>
-          <input id="catalog-search" type="search" placeholder="Поиск: Olympus, Jezero, Gale, Vallis…">
-          <select id="catalog-type" aria-label="Фильтр по типу объекта">
-            <option value="">Все типы</option>
-            <option value="crater">Кратеры (Crater)</option>
-            <option value="mons">Горы (Mons / Montes)</option>
-            <option value="vallis">Долины (Vallis / Valles)</option>
-            <option value="planitia">Равнины (Planitia)</option>
-            <option value="fossa">Борозды / Каньоны (Fossa / Chasma)</option>
-          </select>
+      </aside>
+
+      <div class="info-strip">
+        <button type="button" id="info-toggle" class="corner-btn" aria-expanded="false">info:</button>
+        <span id="info-readout">—</span>
+      </div>
+
+      <div id="info-panel" class="info-panel" hidden>
+        <div class="info-row"><span>POINTER</span><strong id="info-hover">—</strong></div>
+        <div class="info-row"><span>PROBE</span><strong id="info-probe">—</strong></div>
+        <div class="info-row"><span>TARGET</span><strong id="info-target">—</strong></div>
+        <button type="button" id="info-form-btn" class="ghost-btn">To form</button>
+      </div>
+
+      <div id="surface-probe" class="surface-probe" hidden>
+        <span id="probe-text"></span>
+        <button type="button" id="probe-center-btn">Center here</button>
+        <button type="button" id="probe-form-btn">To form</button>
+      </div>
+
+      <div id="loading-overlay" class="loading-overlay">
+        <div class="spinner"></div>
+        <div>
+          <strong id="loading-title">Loading NASA / USGS DEM and orbital imagery…</strong>
+          <small id="loading-sub">Building 3D geometry in a Web Worker</small>
         </div>
-        <div id="catalog-list" class="catalog-list" role="list"></div>
-      </section>
-    </aside>
+      </div>
 
-    <!-- Right Workspace: 3D Three.js Scene + Interactive SVG Elevation Profile -->
-    <section class="stage-column">
-      <div class="viewport-wrap" id="viewport-wrap">
-        <div id="three-container" class="three-container" tabindex="0" aria-label="Interactive 3D Mars terrain mesh"></div>
+      <div class="viewport-hint">
+        LMB: orbit · RMB: pan · wheel: zoom · double-click 3D terrain: elevation probe
+      </div>
+    </section>
 
-        <!-- 3D Projected Feature Labels Overlay -->
-        <div id="pins-layer" class="pins-layer"></div>
-
-        <!-- Top-left 3D Controls HUD -->
-        <div class="hud-toolbar">
-          <label class="hud-control">
-            <span>СЛОЙ ТЕКСТУРЫ</span>
+    <nav class="bottombar" aria-label="Scene controls">
+      <div class="menu-anchor up">
+        <button type="button" id="layers-toggle" class="bottom-link" aria-expanded="false">layers</button>
+        <div id="layers-menu" class="menu layers-menu" hidden>
+          <div class="menu-title">layers</div>
+          <label class="menu-field">
+            <span>TEXTURE LAYER</span>
             <select id="layer-select">
               <option value="viking">Viking Color Mosaic (232 m/px)</option>
               <option value="themis">THEMIS IR + MOLA (100 m/px)</option>
@@ -147,131 +213,102 @@
               <option value="hillshade">HRSC + MOLA Hillshade (200 m)</option>
             </select>
           </label>
-
-          <label class="hud-control">
-            <span>ОХВАТ (SPAN)</span>
-            <select id="span-select">
-              <option value="1">1.0° (~59 км)</option>
-              <option value="1.5">1.5° (~89 км)</option>
-              <option value="2.5">2.5° (~148 км)</option>
-              <option value="4" selected>4.0° (~237 км)</option>
-              <option value="7">7.0° (~415 км)</option>
-              <option value="11">11.0° (~652 км)</option>
-            </select>
-          </label>
-
-          <label class="hud-control slider-control">
-            <span>ВЫСОТА: <strong id="exag-value">4.0×</strong></span>
+          <label class="menu-field slider-control">
+            <span>VERTICAL EXAGGERATION: <strong id="exag-value">4.0×</strong></span>
             <input id="exag-slider" type="range" min="1" max="15" step="0.5" value="4">
           </label>
-
-          <label class="hud-control slider-control">
-            <span>СОЛНЦЕ: <strong id="sun-value">315°</strong></span>
+          <label class="menu-field slider-control">
+            <span>SUN: <strong id="sun-value">315°</strong></span>
             <input id="sun-slider" type="range" min="0" max="360" step="5" value="315">
           </label>
-
           <div class="hud-toggles">
-            <button type="button" id="toggle-pins" class="chip-btn active" title="Метки объектов на 3D-рельефе">Метки 3D</button>
-            <button type="button" id="toggle-route" class="chip-btn active" title="GPS-линия маршрута на рельефе">GPS-линия</button>
-            <button type="button" id="toggle-direct" class="chip-btn active" title="Прямая линия маршрута">Прямая</button>
-            <button type="button" id="toggle-slice" class="chip-btn active" title="Линия разреза профиля в 3D">Линия среза</button>
-            <button type="button" id="toggle-wire" class="chip-btn" title="Каркасная сетка вершин">Сетка</button>
-            <button type="button" id="reset-camera" class="chip-btn" title="Сброс ракурса камеры">⟲ Камера</button>
+            <button type="button" id="toggle-pins" class="chip-btn active">3D marks</button>
+            <button type="button" id="toggle-route" class="chip-btn active">GPS line</button>
+            <button type="button" id="toggle-direct" class="chip-btn active">Direct line</button>
+            <button type="button" id="toggle-slice" class="chip-btn active">Slice line</button>
+            <button type="button" id="toggle-wire" class="chip-btn">Wireframe</button>
           </div>
-        </div>
-
-        <!-- Double-click 3D Surface Probe Readout -->
-        <div id="surface-probe" class="surface-probe" hidden>
-          <span id="probe-text"></span>
-          <button type="button" id="probe-center-btn">Центр сюда</button>
-          <button type="button" id="probe-form-btn">В форму</button>
-        </div>
-
-        <!-- Loading Banner -->
-        <div id="loading-overlay" class="loading-overlay">
-          <div class="spinner"></div>
-          <div>
-            <strong id="loading-title">Загрузка DEM и спутникового снимка NASA / USGS…</strong>
-            <small id="loading-sub">Построение 3D-геометрии в Web Worker</small>
-          </div>
-        </div>
-
-        <div class="viewport-hint">
-          ЛКМ: вращение · ПКМ: панорама · Колесо: зум · Двойной клик по 3D-рельефу: замер высоты точки
         </div>
       </div>
 
-      <!-- Bottom Dock: SVG Elevation Profile & Telemetry -->
-      <section class="profile-dock">
-        <div class="profile-header">
-          <div>
-            <div class="eyebrow">04 / РАЗРЕЗ ВЫСОТ (SVG ELEVATION PROFILE · S16 METRES)</div>
-            <h3 id="profile-title">Центральный разрез рельефа</h3>
-          </div>
-          <div class="profile-controls">
-            <div class="slice-buttons" role="group" aria-label="Направление разреза">
-              <button type="button" data-slice="ew" class="active">Запад → Восток</button>
-              <button type="button" data-slice="ns">Север → Юг</button>
-              <button type="button" data-slice="diag">ЮЗ → СВ</button>
-            </div>
-            <span id="profile-hover-readout" class="profile-readout">Наведите курсор на график для синхронизации с 3D-сценой</span>
-          </div>
+      <div class="menu-anchor up">
+        <button type="button" id="span-toggle" class="bottom-link" aria-expanded="false">span</button>
+        <div id="span-menu" class="menu span-menu" hidden>
+          <div class="menu-title">span</div>
+          <label class="menu-field">
+            <span>SITE SPAN</span>
+            <select id="span-select">
+              <option value="0.05">0.05° (~3 km)</option>
+              <option value="0.1">0.10° (~6 km)</option>
+              <option value="0.25">0.25° (~15 km)</option>
+              <option value="0.5">0.50° (~30 km)</option>
+              <option value="1">1.0° (~59 km)</option>
+              <option value="1.5">1.5° (~89 km)</option>
+              <option value="2.5">2.5° (~148 km)</option>
+              <option value="4" selected>4.0° (~237 km)</option>
+              <option value="7">7.0° (~415 km)</option>
+              <option value="11">11.0° (~652 km)</option>
+            </select>
+          </label>
+          <p class="hint-line">At spans ≤ 1° the app automatically searches USGS STAC for HiRISE/CTX DTMs.</p>
         </div>
+      </div>
 
-        <div class="profile-body">
-          <div class="svg-wrap">
-            <svg id="profile-svg" viewBox="0 0 760 156" preserveAspectRatio="none" role="img" aria-label="Профиль высот участка Марса"></svg>
-          </div>
+      <button type="button" id="profile-toggle" class="bottom-link" aria-expanded="false">elevation profile:</button>
+      <span class="bottom-spacer"></span>
+      <span id="active-target-label" class="bottom-target">MARS · LOADING TERRAIN…</span>
+    </nav>
 
-          <dl class="telemetry-cards">
-            <div>
-              <dt>МИН / МАКС ВЫСОТА</dt>
-              <dd id="stat-minmax">—</dd>
-            </div>
-            <div>
-              <dt>ПЕРЕПАД РЕЛЬЕФА</dt>
-              <dd id="stat-relief">—</dd>
-            </div>
-            <div>
-              <dt>РАЗМЕР УЧАСТКА</dt>
-              <dd id="stat-footprint">—</dd>
-            </div>
-            <div>
-              <dt>УКЛОН (СРЕД / МАКС)</dt>
-              <dd id="stat-slope">—</dd>
-            </div>
-            <div class="wide">
-              <dt>ИСТОЧНИК DEM И КЕШ</dt>
-              <dd id="stat-source">—</dd>
-            </div>
-          </dl>
+    <section class="profile-dock" id="profile-dock" hidden>
+      <div class="profile-header">
+        <div>
+          <div class="eyebrow">05 / ELEVATION PROFILE (SVG · S16 METRES)</div>
+          <h3 id="profile-title">Central terrain section</h3>
         </div>
-      </section>
-
-      <section class="route-dock" id="route-dock" hidden>
-        <div class="route-head">
-          <div>
-            <div class="eyebrow">05 / GPS-МАРШРУТ ИЗ 2D-ПЛАНИРОВЩИКА</div>
-            <h3 id="route-name">Маршрут</h3>
-            <p class="hint-line" id="route-source"></p>
+        <div class="profile-controls">
+          <div class="slice-buttons" role="group" aria-label="Section direction">
+            <button type="button" data-slice="ew" class="active">West → East</button>
+            <button type="button" data-slice="ns">North → South</button>
+            <button type="button" data-slice="diag">SW → NE</button>
           </div>
-          <div class="route-actions">
-            <a id="route-gpx" class="chip-btn" href="#" download>GPX ↓</a>
-            <button type="button" id="route-clear" class="chip-btn">Убрать маршрут</button>
-          </div>
+          <button type="button" class="panel-close" id="profile-close" aria-label="Close profile">×</button>
         </div>
-        <dl class="route-stats">
-          <div><dt>ДЛИНА</dt><dd id="route-distance">—</dd></div>
-          <div><dt>ПОДЪЁМ</dt><dd id="route-ascent">—</dd></div>
-          <div><dt>МАКС. УКЛОН</dt><dd id="route-slope">—</dd></div>
-          <div><dt>ЭНЕРГИЯ</dt><dd id="route-energy">—</dd></div>
-          <div><dt>ТОЧЕК GPS</dt><dd id="route-points">—</dd></div>
+      </div>
+      <div class="profile-body">
+        <div class="svg-wrap">
+          <svg id="profile-svg" viewBox="0 0 760 156" preserveAspectRatio="none" role="img" aria-label="Mars site elevation profile"></svg>
+        </div>
+        <dl class="telemetry-cards">
+          <div><dt>MIN / MAX ELEVATION</dt><dd id="stat-minmax">—</dd></div>
+          <div><dt>RELIEF</dt><dd id="stat-relief">—</dd></div>
+          <div><dt>SITE SIZE</dt><dd id="stat-footprint">—</dd></div>
+          <div><dt>SLOPE (MEAN / MAX)</dt><dd id="stat-slope">—</dd></div>
+          <div class="wide"><dt>DEM SOURCE AND CACHE</dt><dd id="stat-source">—</dd></div>
         </dl>
-        <p class="hint-line">
-          Линия драпируется по высотам DEM: зелёная — выбранный маршрут, розовый пунктир — прямая.
-          Источник: Safe Route Lab. При открытии зоны Jezero используется локальный HiRISE DEM и ортофото.
-        </p>
-      </section>
+      </div>
+      <div class="profile-readout" id="profile-hover-readout">Hover the chart to sync with the 3D scene</div>
+    </section>
+
+    <section class="route-dock" id="route-dock" hidden>
+      <div class="route-head">
+        <div>
+          <div class="eyebrow">06 / GPS ROUTE FROM THE 2D PLANNER</div>
+          <h3 id="route-name">Route</h3>
+          <p class="hint-line" id="route-source"></p>
+        </div>
+        <div class="route-actions">
+          <a id="route-gpx" class="chip-btn" href="#" download>GPX ↓</a>
+          <button type="button" id="route-clear" class="chip-btn">Remove</button>
+          <button type="button" class="panel-close" id="route-close" aria-label="Hide route">×</button>
+        </div>
+      </div>
+      <dl class="route-stats">
+        <div><dt>LENGTH</dt><dd id="route-distance">—</dd></div>
+        <div><dt>ASCENT</dt><dd id="route-ascent">—</dd></div>
+        <div><dt>MAX SLOPE</dt><dd id="route-slope">—</dd></div>
+        <div><dt>ENERGY</dt><dd id="route-energy">—</dd></div>
+        <div><dt>GPS POINTS</dt><dd id="route-points">—</dd></div>
+      </dl>
     </section>
   </main>
 
