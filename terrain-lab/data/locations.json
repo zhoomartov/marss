@@ -1,0 +1,24 @@
+[
+  {
+    "id": "custom-ares-base",
+    "name": "База Арес-3 (Acidalia Planitia)",
+    "type": "Landing site",
+    "lat": 31.2,
+    "lon": -28.5,
+    "spanDeg": 2.5,
+    "diameterKm": 0,
+    "source": "custom",
+    "createdAt": "2026-11-14T00:00:00.000Z"
+  },
+  {
+    "id": "custom-perseverance",
+    "name": "Octavia E. Butler Landing (Perseverance)",
+    "type": "Rover landing",
+    "lat": 18.4447,
+    "lon": 77.4508,
+    "spanDeg": 1.4,
+    "diameterKm": 0,
+    "source": "custom",
+    "createdAt": "2026-11-14T00:00:00.000Z"
+  }
+]

@@ -1,0 +1,12 @@
+{
+  "name": "ares-terrain-lab",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dynamic 3D Mars Terrain Lab & REST API companion for ARES Exploration Atlas",
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check server.mjs && node --check public/mars-coords.js && node --check public/terrain-worker.js && node --check public/app.js",
+    "test": "node --test terrain.test.mjs"
+  }
+}
