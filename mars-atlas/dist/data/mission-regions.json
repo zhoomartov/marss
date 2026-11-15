@@ -17,7 +17,7 @@
       4588647.32542954,
       1094699.9921234027
     ],
-    "imageProcessing": "RED-band monochrome orthoimage. Bilinear sampling to exact DEM footprint; linear 1–99 percentile contrast stretch.",
+    "imageProcessing": "RED-band monochrome orthoimage; bilinear sampling to exact DEM footprint; linear 1–99 percentile contrast stretch.",
     "imageMissingPercent": 0.15718936920166016,
     "sourceItemId": "DTEEC_002387_1985_003798_1985_A01"
   },
@@ -39,7 +39,7 @@
       4591366.995009379,
       1093786.338221914
     ],
-    "imageProcessing": "RED-band monochrome orthoimage. Bilinear sampling to exact DEM footprint; linear 1–99 percentile contrast stretch.",
+    "imageProcessing": "RED-band monochrome orthoimage; bilinear sampling to exact DEM footprint; linear 1–99 percentile contrast stretch.",
     "imageMissingPercent": 0.0002384185791015625,
     "sourceItemId": "DTEEC_045994_1985_046060_1985_U01"
   },
@@ -61,7 +61,7 @@
       4594869.918042409,
       1093810.138349538
     ],
-    "imageProcessing": "RED-band monochrome orthoimage. Bilinear sampling to exact DEM footprint; linear 1–99 percentile contrast stretch.",
+    "imageProcessing": "RED-band monochrome orthoimage; bilinear sampling to exact DEM footprint; linear 1–99 percentile contrast stretch.",
     "imageMissingPercent": 0.0008106231689453125,
     "sourceItemId": "DTEEC_048842_1985_048908_1985_U01"
   }

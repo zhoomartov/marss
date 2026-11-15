@@ -4,9 +4,10 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "check": "node --check dist/app.js && node --check dist/journey.js && node --check dist/flight.js && node --check dist/wmts.js && node --check dist/route.js && node --check dist/usgs-themis.js && node --check dist/environment.js && node --check dist/environment-ui.js && node --check dist/moons.js && node --check dist/rover-core.js && node --check dist/rover-worker.js && node --check dist/rover-ui.js && node --check scripts/convert-hirise-dtm.mjs",
-    "test": "node --test flight.test.mjs wmts.test.mjs usgs.test.mjs environment.test.mjs rover.test.mjs convert-dtm.test.mjs",
-    "convert:terrain": "node scripts/convert-hirise-dtm.mjs"
+    "check": "node --check dist/app.js && node --check dist/journey.js && node --check dist/flight.js && node --check dist/wmts.js && node --check dist/route.js && node --check dist/usgs-themis.js && node --check dist/environment.js && node --check dist/environment-ui.js && node --check dist/moons.js && node --check dist/rover-core.js && node --check dist/rover-worker.js && node --check dist/rover-ui.js && node --check scripts/convert-hirise-dtm.mjs && node --check dist/rover-map.js && node --check scripts/fetch-hirise-regions.mjs",
+    "test": "node --test flight.test.mjs wmts.test.mjs usgs.test.mjs environment.test.mjs rover.test.mjs convert-dtm.test.mjs mission-regions.test.mjs",
+    "convert:terrain": "node scripts/convert-hirise-dtm.mjs",
+    "fetch:regions": "node scripts/fetch-hirise-regions.mjs"
   },
   "dependencies": {
     "geotiff": "3.0.5"
