@@ -191,14 +191,14 @@
         <div class="map-actions" role="group" aria-label="Map interaction tools">
           <button type="button" data-mode="pan" class="active" aria-pressed="true">✥ Pan / Zoom</button>
           <button type="button" data-mode="start">① Set Point A (Start)</button>
-          <button type="button" data-mode="goal">② Set Point B (Target)</button>
-          <button type="button" id="swap-points">⇄ Swap A ↔ B</button>
+          <button type="button" data-mode="stop">＋ Add stop</button>
+          <button type="button" data-mode="goal">Ⓑ Set Point B (Destination)</button>
           <button type="button" data-mode="zone">＋ Hazard exclusion</button>
           <button type="button" id="clear-zones">Clear exclusions</button>
           <button type="button" id="expand-map" class="map-size-btn" aria-pressed="false">⤢ Expand map</button>
           <button type="button" id="fullscreen-map" class="map-size-btn">⛶ Full screen</button>
         </div>
-        <p id="pick-help" class="note">Drag to pan; scroll or use +/− to zoom up to 6×. Select Point A or Point B and click anywhere on the NASA terrain to replan.</p>
+        <p id="pick-help" class="note">Drag to pan; scroll or use +/− to zoom up to 6×. Pick A, “Add stop”, or B, then click the NASA terrain to build an ordered multi-stop mission.</p>
 
         <div class="map-wrap" id="map-wrap">
           <canvas id="terrain-map" width="2048" height="2048" tabindex="0" aria-label="Georeferenced Mars orbital image, hazard layers, and planned routes."></canvas>
@@ -218,7 +218,8 @@
           <span><i class="safest-line"></i>Safest</span>
           <span><i class="energy-line"></i>Min energy</span>
           <span><i class="shortest"></i>Shortest</span>
-          <span><i class="direct"></i>Direct A→B</span>
+          <span><i class="direct"></i>Direct via waypoints</span>
+          <span><i class="waypoint-dot"></i>Surface stop</span>
           <span><i class="blocked"></i>Blocked hazard</span>
         </div>
       </div>
@@ -236,15 +237,15 @@
       </div>
 
       <details class="coordinates">
-        <summary>Exact coordinates (Point A / Point B) &amp; exclusion zones</summary>
-        <div class="input-grid">
-          <label>Point A · latitude (°N)<input id="start-lat" type="number" step="0.0001"></label>
-          <label>Point A · longitude (°E)<input id="start-lon" type="number" step="0.0001"></label>
-          <label>Point B · latitude (°N)<input id="goal-lat" type="number" step="0.0001"></label>
-          <label>Point B · longitude (°E)<input id="goal-lon" type="number" step="0.0001"></label>
+        <summary>Mission waypoints, intermediate stops &amp; exclusion zones</summary>
+        <div id="waypoint-list" class="waypoint-list" role="group" aria-label="Ordered mission waypoints"></div>
+        <div class="waypoint-actions">
+          <button type="button" id="add-stop">＋ Add stop</button>
+          <button type="button" id="reverse-waypoints">⇅ Reverse order</button>
+          <button type="button" id="clear-stops">Clear intermediate stops</button>
+          <button type="button" id="apply-points">Apply coordinates</button>
         </div>
-        <button type="button" id="apply-points">Apply coordinates</button>
-        <p class="note">Coordinates use the Mars 2000 / MOLA aeroid sphere defined in the NASA GeoTIFF metadata. Exclusion circles represent mission keep-out zones (e.g., loose sand traps or uninspected craters).</p>
+        <p class="note">The mission is flown in the listed order: A → stop 1 → … → B. Every intermediate waypoint costs one surface stop (hotel load and crew time) and is optimized as its own leg with the active objective. Coordinates use the Mars 2000 / MOLA aeroid sphere defined in the NASA GeoTIFF metadata. Exclusion circles represent mission keep-out zones (e.g., loose sand traps or uninspected craters).</p>
         <p id="point-summary"></p>
       </details>
     </section>
@@ -287,7 +288,7 @@
             </tbody>
           </table>
         </div>
-        <p class="note" id="comparison-note">One-way distance is Point A → Point B; energy, time, and radiation dose include the return leg (when enabled) and science stop.</p>
+        <p class="note" id="comparison-note">One-way distance is the full ordered waypoint chain; energy, time, and radiation dose include the return leg (when enabled) and one surface stop per waypoint.</p>
       </article>
 
       <article>
@@ -304,6 +305,30 @@
         </svg>
         <div id="risk-breakdown" class="breakdown-block"></div>
         <div id="energy-breakdown" class="breakdown-block"></div>
+      </article>
+
+      <article class="legs-card">
+        <h3>Per-leg mission breakdown</h3>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Leg</th>
+                <th>Segment</th>
+                <th>One-way</th>
+                <th>Energy</th>
+                <th>Time</th>
+                <th>Dose</th>
+                <th>Max slope</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="legs">
+              <tr><td colspan="8">Awaiting calculation…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note" id="legs-note">Each leg is optimized independently in waypoint order; per-leg energy, time, and dose include that leg’s destination surface stop, so they sum to the mission totals.</p>
       </article>
     </div>
 
@@ -327,7 +352,7 @@
       <article>
         <b>03</b>
         <h3>Constrained A* / Pareto</h3>
-        <p>Searches an 8-neighbour graph with strict diagonal corner-blocking using an admissible physical lower bound. When unconstrained optima exceed battery, time, or radiation dose budgets, exact nondominated Pareto labels find the best feasible path.</p>
+        <p>Searches an 8-neighbour graph with strict diagonal corner-blocking using an admissible physical lower bound. When unconstrained optima exceed battery, time, or radiation dose budgets, exact nondominated Pareto labels find the best feasible path. Multi-stop missions are optimized leg by leg in waypoint order; budgeted chains reserve a provable lower bound for every remaining leg, so an early greedy leg cannot starve the rest of the traverse.</p>
       </article>
       <article>
         <b>04</b>
@@ -339,6 +364,7 @@
       <summary>Mathematical formulation &amp; operational scope</summary>
       <p class="formula">J(e) = α · R(e) + β · E(e),   R(e) = w_s·R_slope + w_r·R_rough + w_rad·D_µSv + w_w·R_weather + w_th·R_thermal + w_sh·R_shelter</p>
       <p>Atmospheric column mass σ(z) = (P₀ · exp(−Δz / H) / g) · 0.1 g/cm² scales MSL Curiosity RAD galactic cosmic ray baseline (~27.9 µSv/h) and solar particle event flux with hull/suit areal shielding and local terrain horizon occlusion. Energy E = Σ [m·g·Crr·d/η + m·g·max(Δh,0)/η]/3.6×10⁶ + P_hotel·t/1000 kWh.</p>
+      <p><strong>Multi-stop scope:</strong> a mission is the ordered chain A → stop 1 → … → B. Every intermediate waypoint incurs one surface stop (hotel load and crew time), and mission metrics equal the sum of per-leg metrics. Unbudgeted chains receive per-leg A* / Dijkstra verification; chains whose totals exceed a budget are solved sequentially, reserving a provable lower bound for every remaining leg. This is a documented sequential optimum, not a claim of global multi-stop optimality.</p>
       <p><strong>Scope &amp; honesty notice:</strong> Climate grids (MCD 6.2) are seasonal climatology, and radiation values come from an explicit analytical transport parametrization anchored to MSL RAD rather than live orbital dosimetry. Sub-grid rocks, regolith cohesion, and wheel slip require local stereo perception during real surface operations.</p>
     </details>
   </section>

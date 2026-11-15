@@ -365,7 +365,7 @@ export function graph(t, input = {}, exclusions = [], anchorNode = null) {
   return {
     t, p, blocked, doseRate, cellHazard, weather: wf, effSpeedKmh,
     edge, neighbours, edgeCostByObjective, multiplier,
-    stopEnergy, stopDoseFor, energyBudget, timeBudget, doseBudget, enforceDose, hotelW,
+    stopEnergy, stopDoseFor, energyBudget, timeBudget, doseBudget, enforceDose, hotelW, minDoseRate,
     lowerBound(a, b, obj = 'energy') {
       const d = metres(t.coords[a], t.coords[b], t.projection.radius);
       if (obj === 'distance') return d;
@@ -407,13 +407,17 @@ class Heap {
   }
 }
 
-export function metrics(g, path) {
-  const goalNode = path.at(-1) ?? 0;
-  const stopDose = g.stopDoseFor ? g.stopDoseFor(goalNode) : 0;
+export function metrics(g, path, stops = null) {
+  // One surface stop per waypoint; defaults to the single destination stop.
+  const stopNodes = stops && stops.length ? stops : (path.length ? [path[path.length - 1]] : []);
+  const stopEnergy = g.stopEnergy || 0;
+  let stopDose = 0;
+  for (const node of stopNodes) stopDose += g.stopDoseFor ? g.stopDoseFor(node) : 0;
   const m = {
-    energy: g.stopEnergy, hours: g.p.stopHours, lengthM: 0, ascentM: 0, descentM: 0,
-    maxSlopeDeg: 0, maxRoughnessM: 0, rolling: 0, climb: 0, hotel: g.stopEnergy,
-    doseUsv: stopDose, stopDoseUsv: stopDose, risk: 0,
+    energy: stopEnergy * stopNodes.length, hours: (g.p.stopHours || 0) * stopNodes.length,
+    lengthM: 0, ascentM: 0, descentM: 0,
+    maxSlopeDeg: 0, maxRoughnessM: 0, rolling: 0, climb: 0, hotel: stopEnergy * stopNodes.length,
+    doseUsv: stopDose, stopDoseUsv: stopDose, stops: stopNodes.length, risk: 0,
     slopeRisk: 0, roughRisk: 0, radRisk: 0, weatherRisk: 0, thermalRisk: 0, shelterRisk: 0,
     maxShelterKm: 0
   };
@@ -654,6 +658,247 @@ export function plan(t, startPoint, endPoint, input = {}, exclusions = [], optio
     ...result,
     metrics: finalMetrics,
     profile,
+    minimumUnconstrained: em
+  };
+}
+
+// Join per-leg node chains into one continuous path (waypoint nodes are shared, never duplicated).
+function chainPath(legs) {
+  const path = [];
+  for (const leg of legs) {
+    for (const node of leg.path) {
+      if (!path.length || path[path.length - 1] !== node) path.push(node);
+    }
+  }
+  return path;
+}
+
+// Ordered multi-stop mission: optimize each leg in sequence. Unbudgeted runs give the reference
+// strategies; budgeted runs reserve a provable lower bound for every remaining leg so a greedy
+// early leg can never starve the rest of the traverse.
+function solveChain(g, nodes, objective, { budgeted = false, options = {} } = {}) {
+  const legs = [];
+  const paid = { energy: 0, hours: 0, dose: 0 };
+  let expanded = 0, labelCount = 0, method = null;
+  for (let k = 0; k + 1 < nodes.length; k++) {
+    const a = nodes[k], b = nodes[k + 1];
+    if (g.blocked[a] || g.blocked[b]) {
+      return { status: 'blocked-endpoint', legs, expanded, blockedLeg: k };
+    }
+    let run;
+    if (budgeted) {
+      const rest = nodes.slice(k + 1);
+      const final = nodes[nodes.length - 1];
+      const stopsLeft = rest.length - 1;
+      const reserveEnergy = g.lowerBound(b, final, 'energy') + (g.stopEnergy || 0) * stopsLeft;
+      // Remaining transit is bounded from this leg's destination, so nothing already paid is reserved twice.
+      const reserveHours = g.minTime(b, final) + (g.p.stopHours || 0) * stopsLeft;
+      const reserveDose = g.enforceDose ? g.minDose(b, final) + (g.minDoseRate || 0) * g.p.stopHours * stopsLeft : 0;
+      const envelope = {
+        energy: g.energyBudget - paid.energy - reserveEnergy,
+        hours: g.timeBudget - paid.hours - reserveHours,
+        dose: g.enforceDose ? g.doseBudget - paid.dose - reserveDose : g.doseBudget
+      };
+      if (envelope.energy < 0 || envelope.hours < 0 || (g.enforceDose && envelope.dose < 0)) {
+        return { status: 'infeasible', legs, expanded, labelCount };
+      }
+      const scope = Object.create(g);
+      scope.energyBudget = envelope.energy;
+      scope.timeBudget = envelope.hours;
+      scope.doseBudget = Math.max(0, envelope.dose);
+      run = constrained(scope, a, b, { ...options, objective });
+      labelCount += run.labelCount || 0;
+      if (run.method) method = run.method;
+    } else {
+      run = shortest(g, a, b, { objective, heuristic: objective !== 'distance' });
+    }
+    expanded += run.expanded || 0;
+    if (run.status !== 'optimal') {
+      return { status: run.status, legs, expanded, labelCount, blockedLeg: k };
+    }
+    const legMetrics = metrics(g, run.path);
+    paid.energy += legMetrics.energy;
+    paid.hours += legMetrics.hours;
+    paid.dose += legMetrics.doseUsv;
+    legs.push({ start: a, goal: b, from: k, to: k + 1, path: run.path, status: 'optimal', cost: run.cost, expanded: run.expanded || 0 });
+  }
+  return { status: 'optimal', legs, expanded, labelCount, method };
+}
+
+// Ordered waypoint mission planner. Two waypoints delegate to the verified single-leg planner.
+export function planRoute(t, waypoints, input = {}, exclusions = [], options = {}) {
+  if (!Array.isArray(waypoints) || waypoints.length < 2) throw Error('At least two waypoints are required');
+  const points = waypoints.map(p => ({ lat: Number(p.lat), lon: Number(p.lon) }));
+  if (points.some(p => !Number.isFinite(p.lat) || !Number.isFinite(p.lon) || Math.abs(p.lat) > 90 || Math.abs(p.lon) > 180)) {
+    throw Error('Invalid waypoint coordinates');
+  }
+  if (points.length === 2) {
+    const single = plan(t, points[0], points[1], input, exclusions, options);
+    return {
+      ...single,
+      snapMetres: [single.snapMetres?.start ?? 0, single.snapMetres?.goal ?? 0],
+      waypoints: points,
+      nodes: [single.start, single.goal],
+      stopsCount: 1,
+      legs: single.path?.length ? [{ start: single.start, goal: single.goal, from: 0, to: 1, path: single.path, status: single.status, metrics: single.metrics, expanded: single.expanded }] : []
+    };
+  }
+
+  const nodes = points.map(p => nodeAt(t, p));
+  const g = graph(t, input, exclusions, nodes[0]);
+  const objective = g.p.objective;
+  const last = nodes.length - 1;
+  const stopNodes = nodes.slice(1);
+  const base = {
+    start: nodes[0], goal: nodes[last], nodes,
+    waypoints: points,
+    objective, assumptions: g.p,
+    energyBudget: g.energyBudget, timeBudget: g.timeBudget, doseBudget: g.doseBudget, enforceDose: g.enforceDose,
+    weather: g.weather, effSpeedKmh: g.effSpeedKmh,
+    blocked: g.blocked, doseRate: g.doseRate, cellHazard: g.cellHazard,
+    domain: { width: t.width, height: t.height, stepM: t.dx },
+    snapMetres: points.map((p, i) => metres(p, t.coords[nodes[i]], t.projection.radius)),
+    legs: []
+  };
+
+  // Reference "direct" line visiting every waypoint in order.
+  const directPath = [];
+  let directBlocked = -1;
+  for (let k = 0; k + 1 < nodes.length; k++) {
+    const seg = straightPath(t, nodes[k], nodes[k + 1]);
+    const bad = seg.findIndex((n, i) => g.blocked[n] || (i && !g.edge(seg[i - 1], n)));
+    if (bad >= 0 && directBlocked < 0) directBlocked = k;
+    for (const n of seg) if (directPath[directPath.length - 1] !== n) directPath.push(n);
+  }
+  base.direct = {
+    path: directPath,
+    status: directBlocked < 0 ? 'traversable' : 'blocked',
+    blockedLeg: directBlocked,
+    metrics: directBlocked < 0 ? metrics(g, directPath, stopNodes) : null
+  };
+
+  const blockedWaypoint = nodes.findIndex(n => g.blocked[n]);
+  if (blockedWaypoint >= 0) {
+    return {
+      ...base, status: 'blocked-endpoint', path: [], blockedWaypoint,
+      reason: `Waypoint ${blockedWaypoint === 0 ? 'A' : blockedWaypoint === last ? 'B' : 'stop ' + blockedWaypoint} lies on blocked terrain.`
+    };
+  }
+
+  const stopsCount = nodes.length - 1;
+  if (g.stopEnergy * stopsCount > g.energyBudget) {
+    return { ...base, status: 'infeasible', path: [], reason: `${stopsCount} surface stops alone exceed the reserved mission energy budget.` };
+  }
+  if (g.p.stopHours * stopsCount > g.timeBudget) {
+    return { ...base, status: 'infeasible', path: [], reason: `${stopsCount} surface stops alone exceed the available crew time.` };
+  }
+
+  const runOf = key => solveChain(g, nodes, key, { budgeted: false });
+  const runs = { energy: runOf('energy'), distance: runOf('distance'), safest: runOf('safest'), balanced: runOf('balanced'), fastest: runOf('fastest') };
+  const packChain = run => {
+    const path = run.legs.length ? chainPath(run.legs) : [];
+    return { status: run.status, path, legs: run.legs, metrics: run.status === 'optimal' ? metrics(g, path, stopNodes) : null };
+  };
+  const alternatives = {
+    safest: packChain(runs.safest),
+    balanced: packChain(runs.balanced),
+    energy: packChain(runs.energy),
+    fastest: packChain(runs.fastest),
+    shortest: packChain(runs.distance)
+  };
+  base.shortest = alternatives.shortest;
+  base.alternatives = alternatives;
+
+  if (runs.energy.status !== 'optimal') {
+    return { ...base, status: runs.energy.status, path: [], reason: 'No continuous corridor connects every waypoint.' };
+  }
+  const em = alternatives.energy.metrics;
+  if (em.energy > g.energyBudget) {
+    return { ...base, status: 'infeasible', path: [], reason: 'Even the minimum-energy route through all stops exceeds available energy.', minimumRequiredEnergy: em.energy };
+  }
+  if (alternatives.fastest.metrics && alternatives.fastest.metrics.hours > g.timeBudget) {
+    return { ...base, status: 'infeasible', path: [], reason: 'Even the fastest traversable route through all stops exceeds available crew time.', minimumRequiredHours: alternatives.fastest.metrics.hours };
+  }
+
+  const primaryRun = runs[objective] || runs.energy;
+  const primaryPath = packChain(primaryRun).path;
+  const pm = primaryPath.length ? metrics(g, primaryPath, stopNodes) : null;
+  let result;
+  if (pm && withinBudgets(g, pm)) {
+    let costAStar = 0, costDijkstra = 0, expandedDijkstra = 0, maxDelta = 0;
+    const perLeg = [];
+    for (const leg of primaryRun.legs) {
+      const verifier = shortest(g, leg.start, leg.goal, { objective, heuristic: false });
+      if (verifier.status !== 'optimal' || Math.abs(leg.cost - verifier.cost) > 1e-7) throw Error('Optimality verification failed');
+      const delta = Math.abs(leg.cost - verifier.cost);
+      maxDelta = Math.max(maxDelta, delta);
+      costAStar += leg.cost;
+      costDijkstra += verifier.cost;
+      expandedDijkstra += verifier.expanded;
+      perLeg.push({ from: leg.from, to: leg.to, costAStar: leg.cost, costDijkstra: verifier.cost, delta, expanded: verifier.expanded });
+    }
+    result = {
+      status: 'optimal',
+      path: primaryPath,
+      legs: primaryRun.legs,
+      expanded: primaryRun.expanded + expandedDijkstra,
+      method: 'A* + Dijkstra verification per leg',
+      verification: {
+        objective, perLeg,
+        costAStar, costDijkstra, delta: maxDelta,
+        expandedDijkstra,
+        energyAStar: pm.energy
+      },
+      lowerBound: costAStar,
+      gap: 0
+    };
+  } else {
+    const bounded = solveChain(g, nodes, objective, { budgeted: true, options });
+    result = {
+      ...bounded,
+      path: bounded.status === 'optimal' ? chainPath(bounded.legs) : [],
+      method: bounded.method || 'Sequential resource-constrained A* / Pareto labels'
+    };
+  }
+
+  const finalMetrics = result.path?.length ? metrics(g, result.path, stopNodes) : null;
+  const legReports = (result.legs || []).map((leg, index) => ({
+    index, from: leg.from ?? index, to: leg.to ?? index + 1,
+    status: leg.path?.length ? 'optimal' : 'no-path',
+    waypointCount: leg.path?.length || 0,
+    metrics: leg.path?.length ? metrics(g, leg.path) : null
+  }));
+
+  const waypointDistancesKm = [0];
+  for (const leg of legReports) waypointDistancesKm.push(waypointDistancesKm[waypointDistancesKm.length - 1] + (leg.metrics ? leg.metrics.oneWayKm : 0));
+
+  let cumDistM = 0, cumDoseUsv = 0;
+  const profile = (result.path || []).map((node, idx) => {
+    if (idx > 0) {
+      const e = g.edge(result.path[idx - 1], node);
+      if (e) { cumDistM += e.lengthM; cumDoseUsv += e.doseUsv; }
+    }
+    return {
+      ...t.coords[node],
+      distanceKm: cumDistM / 1000,
+      elevationM: t.values[node],
+      slopeDeg: t.slopes[node],
+      roughnessM: t.roughness ? t.roughness[node] : 0,
+      skyView: t.skyView ? t.skyView[node] : 1,
+      doseRateUsvH: g.doseRate[node],
+      cumDoseUsv,
+      hazardIndex: g.cellHazard[node]
+    };
+  });
+
+  return {
+    ...base,
+    ...result,
+    metrics: finalMetrics,
+    profile,
+    legs: legReports,
+    waypointDistancesKm,
+    stopsCount,
     minimumUnconstrained: em
   };
 }

@@ -19,7 +19,7 @@ const REGIONAL_CTX_ZONE = {
 };
 
 let dem = null, grid = null, worker = null, workerReady = false, report = null, climate = null;
-let start = null, goal = null, exclusions = [], mode = 'pan', epoch = 0, busy = false, elapsedMs = 0;
+let waypoints = [], pickIndex = null, exclusions = [], mode = 'pan', epoch = 0, busy = false, elapsedMs = 0;
 let climateEpoch = 0, baseImage = null, regions = [], region = null, photo = null, loadEpoch = 0, loadingRegion = false;
 const view = new MapView(MAX_ZOOM);
 
@@ -62,13 +62,44 @@ function safeValuesPreview() {
   try { return values(); } catch { return { ...DEFAULTS, weatherEffects: true, enforceDose: true }; }
 }
 
-function pointInputs() {
-  if (!start || !goal) return;
-  for (const [name, p] of [['start', start], ['goal', goal]]) {
-    for (const k of ['lat', 'lon']) $(name + '-' + k).value = p[k].toFixed(5);
-  }
-  const crowKm = grid ? metres(start, goal, grid.projection.radius) / 1000 : 0;
-  $('point-summary').textContent = `① Point A (${start.lat.toFixed(5)}°N, ${start.lon.toFixed(5)}°E) → ② Point B (${goal.lat.toFixed(5)}°N, ${goal.lon.toFixed(5)}°E) · Great-circle ${fmt(crowKm, 2)} km · Exclusions: ${exclusions.length}.`;
+function waypointName(i, count = waypoints.length) {
+  return i === 0 ? 'Point A' : i === count - 1 ? 'Point B' : 'Stop ' + i;
+}
+
+function waypointBadge(i, count = waypoints.length) {
+  return i === 0 ? 'A' : i === count - 1 ? 'B' : String(i);
+}
+
+function chainKm() {
+  if (!grid || waypoints.length < 2) return 0;
+  let km = 0;
+  for (let i = 1; i < waypoints.length; i++) km += metres(waypoints[i - 1], waypoints[i], grid.projection.radius);
+  return km / 1000;
+}
+
+function updatePointSummary() {
+  const stops = Math.max(0, waypoints.length - 2);
+  $('point-summary').textContent = waypoints.length < 2
+    ? 'Add at least Point A and Point B.'
+    : `Ordered mission: A → ${stops} intermediate stop${stops === 1 ? '' : 's'} → B · ${waypoints.length - 1} optimized leg${waypoints.length === 2 ? '' : 's'} · Great-circle chain ${fmt(chainKm(), 2)} km · Exclusions: ${exclusions.length}.`;
+}
+
+function renderWaypoints() {
+  const list = $('waypoint-list');
+  if (!list) return;
+  const last = waypoints.length - 1;
+  list.innerHTML = waypoints.map((p, i) => {
+    const name = waypointName(i), badge = waypointBadge(i), intermediate = i > 0 && i < last;
+    return `<div class="waypoint-row${i === pickIndex ? ' picking' : ''}" data-index="${i}">` +
+      `<span class="wp-badge${intermediate ? ' wp-stop' : ''}" title="${name}">${badge}</span>` +
+      `<span class="wp-role">${i === 0 ? 'Start' : i === last ? 'Destination' : 'Stop ' + i}</span>` +
+      `<label>Lat °N<input type="number" step="0.0001" data-wp="${i}" data-k="lat" value="${p.lat.toFixed(7)}" aria-label="${name} latitude"></label>` +
+      `<label>Lon °E<input type="number" step="0.0001" data-wp="${i}" data-k="lon" value="${p.lon.toFixed(7)}" aria-label="${name} longitude"></label>` +
+      `<button type="button" class="wp-pick" data-pick="${i}" title="Place ${name} on the map">◎ Pick</button>` +
+      `<button type="button" class="wp-remove" data-remove="${i}" title="Remove this stop"${intermediate ? '' : ' disabled'}>✕</button>` +
+      `</div>`;
+  }).join('');
+  updatePointSummary();
 }
 
 function clearResults(message) {
@@ -80,6 +111,7 @@ function clearResults(message) {
   $('comparison').innerHTML = '<tr><td colspan="8">' + message + '</td></tr>';
   $('certificate').textContent = 'Optimality has not been verified for the updated parameters.';
   $('profile').innerHTML = '<text x="20" y="105">Recalculate the route to view telemetry</text>';
+  $('legs').innerHTML = '<tr><td colspan="8">Awaiting calculation…</td></tr>';
   $('risk-breakdown').replaceChildren();
   $('energy-breakdown').replaceChildren();
   baseImage = null;
@@ -109,6 +141,7 @@ async function launchWorker() {
       if (worker !== active) return;
       if (data.type === 'ready') {
         grid = data.grid; workerReady = true; resolve();
+        updatePointSummary();
         draw();
       } else if (data.type === 'error') {
         worker._running = false;
@@ -216,8 +249,8 @@ async function loadRegion(selected, useQuery = false) {
     const data = await response.json();
     if (token !== loadEpoch) return;
     dem = data;
-    start = { ...dem.anchors.start };
-    goal = { ...dem.anchors.goal };
+    waypoints = [{ ...dem.anchors.start }, { ...dem.anchors.goal }];
+    pickIndex = null;
 
     if (useQuery) {
       const q = new URLSearchParams(location.search);
@@ -230,14 +263,15 @@ async function loadRegion(selected, useQuery = false) {
           return gp.x >= 0 && gp.y >= 0 && gp.x < dem.width && gp.y < dem.height;
         };
         if (inside(qs) && inside(qg)) {
-          start = qs; goal = qg;
+          waypoints = [qs, qg];
         } else {
           $('region-description').textContent += ' Selected Atlas endpoints lie outside this DEM footprint; default zone anchors are loaded.';
         }
       }
     }
 
-    pointInputs();
+    renderWaypoints();
+    activateMode('pan');
     const imageTask = selected.image ? new Promise(resolve => {
       const img = new Image();
       img.onload = () => {
@@ -289,11 +323,12 @@ async function calculate() {
     const id = epoch;
     busy = true;
     $('calculate').disabled = true;
-    $('status').textContent = `Optimizing (${p.objective}) across ${grid.width}×${grid.height} NASA terrain graph…`;
+    const stops = Math.max(0, waypoints.length - 2);
+    $('status').textContent = `Optimizing (${p.objective}) across ${stops ? stops + ' stops / ' : ''}${waypoints.length - 1} legs on ${grid.width}×${grid.height} NASA terrain graph…`;
     if (!workerReady || (busy && worker._running)) await launchWorker();
     if (id !== epoch) return;
     worker._running = true;
-    worker.postMessage({ type: 'plan', id, start, goal, parameters: p, exclusions });
+    worker.postMessage({ type: 'plan', id, waypoints: waypoints.map(w => ({ lat: w.lat, lon: w.lon })), parameters: p, exclusions });
   } catch (e) {
     busy = false;
     $('calculate').disabled = false;
@@ -390,7 +425,7 @@ function terrainImage() {
 
 function draw() {
   updateZoomBadge();
-  if (!grid || !start || !goal) return;
+  if (!grid || waypoints.length < 2) return;
   if (!baseImage) baseImage = terrainImage();
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.save();
@@ -410,7 +445,7 @@ function draw() {
   const sx = canvas.width / grid.width, sy = canvas.height / grid.height;
 
   if ($('show-shelter').checked) {
-    const p = safeValuesPreview(), qs = gridPosition(grid, start);
+    const p = safeValuesPreview(), qs = gridPosition(grid, waypoints[0]);
     ctx.beginPath();
     ctx.arc((qs.x + 0.5) * sx, (qs.y + 0.5) * sy, (p.maxShelterKm * 1000) / grid.dx * sx, 0, Math.PI * 2);
     ctx.strokeStyle = '#61c9a8cc';
@@ -457,23 +492,26 @@ function draw() {
     ctx.stroke();
   }
 
-  for (const [p, label, color] of [[start, 'A', '#67e8b5'], [goal, 'B', '#ffdc7a']]) {
+  waypoints.forEach((p, i) => {
     const q = gridPosition(grid, p);
-    if (q.x < 0 || q.y < 0 || q.x >= grid.width || q.y >= grid.height) continue;
+    if (q.x < 0 || q.y < 0 || q.x >= grid.width || q.y >= grid.height) return;
     const x = (q.x + 0.5) * sx, y = (q.y + 0.5) * sy;
+    const intermediate = i > 0 && i < waypoints.length - 1;
+    const color = i === 0 ? '#67e8b5' : i === waypoints.length - 1 ? '#ffdc7a' : '#73c6ec';
+    const radius = (intermediate ? 12 : 15) / view.zoom;
     ctx.beginPath();
-    ctx.arc(x, y, 14 / view.zoom, 0, 2 * Math.PI);
+    ctx.arc(x, y, radius, 0, 2 * Math.PI);
     ctx.fillStyle = '#0e1b25';
     ctx.fill();
     ctx.strokeStyle = color;
     ctx.lineWidth = 3 / view.zoom;
     ctx.stroke();
-    ctx.font = 'bold ' + (15 / view.zoom) + 'px Arial';
+    ctx.font = 'bold ' + ((intermediate ? 12 : 15) / view.zoom) + 'px Arial';
     ctx.fillStyle = color;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(label, x, y);
-  }
+    ctx.fillText(waypointBadge(i), x, y);
+  });
   ctx.restore();
 
   const span = metres(coordinates(grid, 0, grid.height / 2), coordinates(grid, grid.width, grid.height / 2), grid.projection.radius) / view.zoom;
@@ -498,18 +536,20 @@ function renderReport() {
     optimal: objNames[r.objective] || 'Optimal route found',
     infeasible: 'Insufficient mission or dose budget',
     'no-path': 'No traversable corridor in this zone',
-    'blocked-endpoint': 'Point A or Point B is on blocked terrain',
+    'blocked-endpoint': 'A waypoint lies on blocked terrain',
     'search-limit': 'Pareto search limit reached'
   };
   $('result-title').textContent = statuses[r.status] || r.status;
   $('status').textContent = `${statuses[r.status] || r.status} · ${fmt(elapsedMs / 1000, 2)} s`;
 
+  const legCount = r.legs?.length || 1;
+  const stopCount = Math.max(0, (r.waypoints?.length || waypoints.length) - 2);
   $('result-description').textContent = r.status === 'optimal'
-    ? `Verified ${r.objective} traverse (${r.assumptions.roundTrip ? 'round trip A→B→A' : 'one-way A→B'} + ${fmt(r.assumptions.stopHours, 1)} h stop). Effective speed under current weather/illumination: ${fmt(r.effSpeedKmh, 2)} km/h (visibility ~${fmt(r.weather?.visibilityKm, 1)} km).`
+    ? `Verified ${r.objective} traverse through ${(r.waypoints?.length || waypoints.length)} ordered waypoints (${legCount} leg${legCount === 1 ? '' : 's'}, ${stopCount} intermediate stop${stopCount === 1 ? '' : 's'}) · ${r.assumptions.roundTrip ? 'round trip B→A' : 'one-way A→B'} + ${fmt(r.assumptions.stopHours, 1)} h per surface stop. Effective speed under current weather/illumination: ${fmt(r.effSpeedKmh, 2)} km/h (visibility ~${fmt(r.weather?.visibilityKm, 1)} km).`
     : r.reason || (r.status === 'blocked-endpoint'
-      ? 'Move Point A or Point B away from steep scarps, excessive roughness, exclusion circles, or weather abort conditions.'
+      ? 'Move the affected waypoint away from steep scarps, excessive roughness, exclusion circles, or weather abort conditions.'
       : r.status === 'no-path'
-      ? 'No connected path satisfies the slope, roughness, shelter-range, and weather cutoffs inside this DEM footprint.'
+      ? 'No connected corridor satisfies the slope, roughness, shelter-range, and weather cutoffs through every waypoint inside this DEM footprint.'
       : 'No path satisfies all active energy, autonomy, and radiation dose budgets simultaneously.');
 
   const m = r.metrics;
@@ -563,7 +603,7 @@ function renderReport() {
     ['Minimum energy', r.alternatives?.energy?.metrics, r.alternatives?.energy?.path?.length ? '' : 'No path', 'energy', false],
     ['Fastest transit', r.alternatives?.fastest?.metrics, r.alternatives?.fastest?.path?.length ? '' : 'No path', 'fastest', false],
     ['Shortest traversable', r.shortest?.metrics, r.shortest?.path?.length ? '' : 'No path', 'distance', false],
-    ['Direct line A→B', r.direct?.metrics, r.direct?.status === 'blocked' ? 'Blocked hazard' : '', null, false]
+    ['Direct line via waypoints', r.direct?.metrics, r.direct?.status === 'blocked' ? 'Blocked hazard' : '', null, false]
   ];
 
   $('comparison').innerHTML = rows.map(([name, x, error, objKey, isSelected]) => {
@@ -590,20 +630,47 @@ function renderReport() {
     };
   });
 
-  $('comparison-note').textContent = `Click any strategy row to switch the active optimizer. Grid snap offset: Point A ${fmt(r.snapMetres?.start, 1)} m, Point B ${fmt(r.snapMetres?.goal, 1)} m.`;
+  $('comparison-note').textContent = `Click any strategy row to switch the active optimizer. Grid snap offsets across ${r.waypoints?.length || waypoints.length} waypoints: worst ${fmt(Math.max(0, ...(r.snapMetres || [])), 1)} m.`;
 
   if (r.status === 'optimal') {
+    const v = r.verification, perLeg = v?.perLeg || [];
     $('certificate').innerHTML =
       `<b>Graph optimality verified (${r.method}).</b><br>` +
-      (r.verification
-        ? `Objective (${r.verification.objective}) — A*: ${fmt(r.verification.costAStar, 6)} · Zero-heuristic Dijkstra: ${fmt(r.verification.costDijkstra, 6)} · Difference: ${r.verification.delta.toExponential(2)}.`
-        : `Exact multi-resource Pareto search over nondominated (cost, energy, time${r.enforceDose ? ', dose' : ''}) labels · Active labels explored: ${r.labelCount?.toLocaleString('en-US')}.`) +
+      (v && perLeg.length > 1
+        ? `Objective (${v.objective}) across ${perLeg.length} legs — A* total: ${fmt(v.costAStar, 6)} · zero-heuristic Dijkstra total: ${fmt(v.costDijkstra, 6)} · worst per-leg gap: ${v.delta.toExponential(2)}.`
+        : v
+        ? `Objective (${v.objective}) — A*: ${fmt(v.costAStar, 6)} · Zero-heuristic Dijkstra: ${fmt(v.costDijkstra, 6)} · Difference: ${v.delta.toExponential(2)}.`
+        : `Sequential resource-constrained search over nondominated (cost, energy, time${r.enforceDose ? ', dose' : ''}) labels with a lower-bound reserve for every remaining leg · Active labels explored: ${r.labelCount?.toLocaleString('en-US')}.`) +
       `<br>Expanded states: ${r.expanded.toLocaleString('en-US')} on ${grid.width} × ${grid.height} NASA DEM graph (${fmt(grid.dx, 1)} m step).`;
   } else {
     $('certificate').textContent = r.status === 'search-limit'
-      ? 'Computation cap reached before exhausting Pareto labels; relax budgets or shorten distance.'
+      ? 'Computation cap reached before exhausting Pareto labels; relax budgets or shorten the mission.'
       : 'No verified route selected under current mission constraints.';
   }
+
+  const legs = r.legs || [];
+  const nodeCount = r.waypoints?.length || waypoints.length;
+  $('legs').innerHTML = legs.length ? legs.map((leg, i) => {
+    const x = leg.metrics, ok = leg.status === 'optimal' && x;
+    return `<tr>` +
+      `<td>${i + 1}</td>` +
+      `<td>${waypointName(leg.from ?? i, nodeCount)} → ${waypointName(leg.to ?? i + 1, nodeCount)}</td>` +
+      `<td>${x ? fmt(x.oneWayKm, 2) + ' km' : '—'}</td>` +
+      `<td>${x ? fmt(x.energy, 2) + ' kWh' : '—'}</td>` +
+      `<td>${x ? fmt(x.hours, 2) + ' h' : '—'}</td>` +
+      `<td>${x ? fmt(x.doseUsv, 1) + ' µSv' : '—'}</td>` +
+      `<td>${x ? fmt(x.maxSlopeDeg, 1) + '°' : '—'}</td>` +
+      `<td class="${ok ? 'good' : 'bad'}">${ok ? 'Optimal' : 'No path'}</td>` +
+      `</tr>`;
+  }).join('') : '<tr><td colspan="8">No legs available for this waypoint chain.</td></tr>';
+
+  const sumOf = key => legs.reduce((s, leg) => s + (leg.metrics?.[key] || 0), 0);
+  const missionComplete = r.status === 'optimal' && legs.length === nodeCount - 1;
+  $('legs-note').textContent = missionComplete
+    ? `Sum of ${legs.length} leg${legs.length === 1 ? '' : 's'}: ${fmt(sumOf('oneWayKm'), 2)} km · ${fmt(sumOf('energy'), 2)} kWh · ${fmt(sumOf('hours'), 2)} h · ${fmt(sumOf('doseUsv'), 1)} µSv — equal to mission totals. Each leg ends with a ${fmt(r.assumptions.stopHours, 1)} h surface stop; the final leg’s stop is the destination.`
+    : legs.length
+    ? `Only ${legs.length} of ${nodeCount - 1} legs were solved before the mission became ${r.status === 'infeasible' ? 'infeasible' : 'untraversable'}; these partial totals are not a complete mission.`
+    : 'Each leg is optimized independently in waypoint order; per-leg energy, time, and dose include that leg’s destination surface stop, so they sum to the mission totals.';
 
   $('export').disabled = false;
   $('print').disabled = false;
@@ -614,6 +681,11 @@ function drawProfile(points) {
   const pMode = $('profile-mode').value;
   const totalKm = points.at(-1).distanceKm || 0.001;
   const xOf = d => 52 + (d / totalKm) * 528;
+  const wpTicks = (report?.waypointDistancesKm || []).slice(1, -1).map((km, i) => {
+    const x = xOf(km).toFixed(1);
+    return `<line x1="${x}" y1="32" x2="${x}" y2="172" stroke="#73c6ec99" stroke-dasharray="3,4"/>` +
+      `<text x="${x}" y="27" fill="#9fd8f2" text-anchor="middle">${i + 1}</text>`;
+  }).join('');
 
   if (pMode === 'radiation') {
     const rates = points.map(p => p.doseRateUsvH), lo = Math.min(...rates), hi = Math.max(...rates);
@@ -624,6 +696,7 @@ function drawProfile(points) {
       `<path d="${ratePath} L580,172 L52,172 Z" fill="#a974ff22"/>` +
       `<path d="${ratePath}" fill="none" stroke="#b993ff" stroke-width="2.2"/>` +
       `<path d="${cumPath}" fill="none" stroke="#5ee39c" stroke-width="2" stroke-dasharray="5,4"/>` +
+      wpTicks +
       `<text x="6" y="34">${fmt(hi, 1)} µSv/h</text>` +
       `<text x="6" y="175">${fmt(lo, 1)} µSv/h</text>` +
       `<text x="52" y="204">A (0 km)</text>` +
@@ -641,6 +714,7 @@ function drawProfile(points) {
       `<path d="${sPath} L580,172 L52,172 Z" fill="#e06d5324"/>` +
       `<path d="${sPath}" fill="none" stroke="#e06d53" stroke-width="2.2"/>` +
       `<path d="${rPath}" fill="none" stroke="#73c6ec" stroke-width="1.8" stroke-dasharray="4,4"/>` +
+      wpTicks +
       `<text x="6" y="34">${fmt(hiS, 1)}°</text>` +
       `<text x="6" y="175">0°</text>` +
       `<text x="52" y="204">A (0 km)</text>` +
@@ -660,6 +734,7 @@ function drawProfile(points) {
     `<path d="${elevPath} L580,172 L52,172 Z" fill="#d6bb9122"/>` +
     `<path d="${elevPath}" fill="none" stroke="#e8c47e" stroke-width="2.2"/>` +
     hazDots +
+    wpTicks +
     `<text x="6" y="34">${fmt(hi, 0)} m</text>` +
     `<text x="6" y="175">${fmt(lo, 0)} m</text>` +
     `<text x="52" y="204">Point A</text>` +
@@ -677,9 +752,20 @@ bindMap(canvas, view, {
     if (mode === 'zone') {
       if (exclusions.length >= 25) { $('status').textContent = 'Maximum of 25 exclusion zones reached.'; return; }
       exclusions.push({ ...p, radiusM: Math.round(Math.min(400, Math.max(25, grid.width * grid.dx * 0.05))) });
-    } else if (mode === 'start') start = p;
-    else goal = p;
-    pointInputs();
+    } else if (mode === 'start' && waypoints.length >= 2) {
+      waypoints[0] = p;
+    } else if (mode === 'goal' && waypoints.length >= 2) {
+      waypoints[waypoints.length - 1] = p;
+    } else if (mode === 'stop' && waypoints.length >= 2) {
+      waypoints.splice(waypoints.length - 1, 0, p);
+    } else if (mode === 'waypoint' && pickIndex !== null && pickIndex < waypoints.length) {
+      waypoints[pickIndex] = p;
+      pickIndex = null;
+      activateMode('pan');
+    } else {
+      return;
+    }
+    renderWaypoints();
     invalidate();
     calculate();
   },
@@ -763,24 +849,120 @@ for (const k of ['gcrBaseUsvH', 'speUsvH']) {
 
 document.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => {
   if (!grid || loadingRegion) return;
-  mode = b.dataset.mode;
-  document.querySelectorAll('[data-mode]').forEach(el => {
-    el.classList.toggle('active', el === b);
-    el.setAttribute('aria-pressed', String(el === b));
-  });
-  canvas.style.cursor = mode === 'pan' ? 'grab' : 'crosshair';
-  const radM = Math.round(Math.min(400, Math.max(25, grid.width * grid.dx * 0.05)));
-  $('pick-help').textContent = mode === 'pan'
-    ? `Drag to pan; scroll or use +/− to zoom up to ${MAX_ZOOM}×.`
-    : mode === 'zone'
-    ? `Click on the map to place a ${radM} m hazard exclusion zone (auto-replans).`
-    : `Click anywhere on the NASA terrain to place ${mode === 'start' ? 'Point A (Start)' : 'Point B (Target)'} (${fmt(grid.dx, 1)} m grid snap).`;
+  activateMode(b.dataset.mode);
 });
 
-$('swap-points').onclick = () => {
-  if (!start || !goal || loadingRegion) return;
-  [start, goal] = [goal, start];
-  pointInputs();
+function activateMode(next, index = null) {
+  mode = next;
+  pickIndex = next === 'waypoint' ? index : null;
+  document.querySelectorAll('[data-mode]').forEach(el => {
+    const on = el.dataset.mode === next;
+    el.classList.toggle('active', on);
+    el.setAttribute('aria-pressed', String(on));
+  });
+  document.querySelectorAll('.waypoint-row').forEach(row => {
+    row.classList.toggle('picking', index !== null && Number(row.dataset.index) === index);
+  });
+  canvas.style.cursor = next === 'pan' ? 'grab' : 'crosshair';
+  const step = fmt(grid?.dx ?? 20, 1);
+  const radM = grid ? Math.round(Math.min(400, Math.max(25, grid.width * grid.dx * 0.05))) : 30;
+  $('pick-help').textContent = next === 'pan'
+    ? `Drag to pan; scroll or use +/− to zoom up to ${MAX_ZOOM}×.`
+    : next === 'zone'
+    ? `Click on the map to place a ${radM} m hazard exclusion zone (auto-replans).`
+    : next === 'stop'
+    ? `Click the NASA terrain to append an intermediate stop before B; each click adds the next ordered waypoint (${step} m grid snap).`
+    : next === 'waypoint'
+    ? `Click the NASA terrain to place ${waypointName(index)} (${step} m grid snap).`
+    : `Click anywhere on the NASA terrain to place ${next === 'start' ? 'Point A (Start)' : 'Point B (Destination)'} (${step} m grid snap).`;
+}
+
+function startPicker(index) {
+  if (!grid || loadingRegion) return;
+  activateMode('waypoint', index);
+  $('map-stage').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function removeWaypoint(index) {
+  if (loadingRegion || index <= 0 || index >= waypoints.length - 1) return;
+  waypoints.splice(index, 1);
+  if (pickIndex !== null) {
+    if (pickIndex === index) { pickIndex = null; activateMode('pan'); }
+    else if (pickIndex > index) pickIndex--;
+  }
+  renderWaypoints();
+  invalidate();
+  calculate();
+}
+
+$('waypoint-list').addEventListener('input', e => {
+  const el = e.target.closest('[data-wp]');
+  if (!el) return;
+  const i = Number(el.dataset.wp), k = el.dataset.k, v = Number(el.value);
+  if (!waypoints[i] || !Number.isFinite(v) || Math.abs(v) > (k === 'lat' ? 90 : 180)) return;
+  waypoints[i][k] = v;
+  updatePointSummary();
+});
+
+$('waypoint-list').addEventListener('click', e => {
+  const pick = e.target.closest('[data-pick]');
+  if (pick) { startPicker(Number(pick.dataset.pick)); return; }
+  const remove = e.target.closest('[data-remove]');
+  if (remove && !remove.disabled) removeWaypoint(Number(remove.dataset.remove));
+});
+
+$('add-stop').onclick = () => {
+  if (!grid || loadingRegion) return;
+  let insertAt = waypoints.length - 1;
+  let p = null;
+  // Insert at the midpoint of the longest leg of the active verified path: guaranteed traversable,
+  // roughly equidistant from its neighbours, and ordered correctly inside the mission chain.
+  const path = report?.path || [], fixed = report?.nodes || [];
+  if (path.length > 2 && fixed.length === waypoints.length) {
+    const pos = fixed.map(n => path.indexOf(n));
+    let bestK = -1, bestLen = 0;
+    if (pos.every(i => i >= 0)) {
+      for (let k = 0; k + 1 < pos.length; k++) {
+        const len = pos[k + 1] - pos[k];
+        if (len > bestLen) { bestLen = len; bestK = k; }
+      }
+    }
+    if (bestK >= 0 && bestLen > 1) {
+      const node = path[Math.floor((pos[bestK] + pos[bestK + 1]) / 2)];
+      if (!fixed.includes(node)) {
+        p = coordinates(grid, node % grid.width, Math.floor(node / grid.width));
+        insertAt = bestK + 1;
+      }
+    }
+  }
+  if (!p) {
+    const a = waypoints[waypoints.length - 2], b = waypoints[waypoints.length - 1];
+    p = { lat: (a.lat + b.lat) / 2, lon: (a.lon + b.lon) / 2 };
+  }
+  waypoints.splice(insertAt, 0, p);
+  pickIndex = null;
+  renderWaypoints();
+  invalidate();
+  calculate();
+};
+
+$('reverse-waypoints').onclick = () => {
+  if (loadingRegion || waypoints.length < 2) return;
+  waypoints.reverse();
+  pickIndex = null;
+  activateMode('pan');
+  renderWaypoints();
+  invalidate();
+  calculate();
+};
+
+$('clear-stops').onclick = () => {
+  if (loadingRegion || waypoints.length < 2) return;
+  if (waypoints.length === 2) { $('status').textContent = 'The mission already has no intermediate stops.'; return; }
+  waypoints = [waypoints[0], waypoints[waypoints.length - 1]];
+  pickIndex = null;
+  activateMode('pan');
+  renderWaypoints();
   invalidate();
   calculate();
 };
@@ -808,18 +990,34 @@ $('sync-climate').onclick = () => { syncFormWithClimate(); invalidate(); calcula
 
 $('apply-points').onclick = () => {
   if (!grid || loadingRegion) return;
-  const points = ['start', 'goal'].map(name => ({ lat: Number($(name + '-lat').value), lon: Number($(name + '-lon').value) }));
-  if (points.some(p => !Number.isFinite(p.lat) || !Number.isFinite(p.lon) || Math.abs(p.lat) > 90 || Math.abs(p.lon) > 180)) {
-    $('status').textContent = 'Enter valid latitude/longitude coordinates.';
+  const rows = [...$('waypoint-list').querySelectorAll('.waypoint-row')];
+  const cellOf = p => {
+    const q = gridPosition(grid, p);
+    return Math.round(q.x) + ',' + Math.round(q.y);
+  };
+  const points = rows.map((row, i) => {
+    const p = {
+      lat: Number(row.querySelector('[data-k="lat"]').value),
+      lon: Number(row.querySelector('[data-k="lon"]').value)
+    };
+    // An untouched row keeps its full-precision coordinate when the displayed value still lands in the same cell.
+    const prev = waypoints[i];
+    if (prev && Number.isFinite(p.lat) && Number.isFinite(p.lon) && cellOf(p) === cellOf(prev)) return { ...prev };
+    return p;
+  });
+  if (points.length < 2 || points.some(p => !Number.isFinite(p.lat) || !Number.isFinite(p.lon) || Math.abs(p.lat) > 90 || Math.abs(p.lon) > 180)) {
+    $('status').textContent = 'Enter valid latitude/longitude coordinates for every waypoint.';
     return;
   }
-  [start, goal] = points;
-  pointInputs();
+  waypoints = points;
+  pickIndex = null;
+  activateMode('pan');
+  renderWaypoints();
   invalidate();
   calculate();
 };
 
-$('clear-zones').onclick = () => { exclusions = []; pointInputs(); invalidate(); calculate(); };
+$('clear-zones').onclick = () => { exclusions = []; updatePointSummary(); invalidate(); calculate(); };
 
 $('demo').onclick = async () => {
   if (!dem || loadingRegion) return;
@@ -827,10 +1025,11 @@ $('demo').onclick = async () => {
   $('preset-select').value = 'crewed-rover';
   $('solar-scenario').value = 'quiet';
   applyPresetValues('crewed-rover');
-  start = { ...dem.anchors.start };
-  goal = { ...dem.anchors.goal };
+  waypoints = [{ ...dem.anchors.start }, { ...dem.anchors.goal }];
+  pickIndex = null;
   exclusions = [];
-  pointInputs();
+  activateMode('pan');
+  renderWaypoints();
   try { await loadClimate(true); await calculate(); } catch {}
 };
 
@@ -852,7 +1051,13 @@ $('export').onclick = () => {
     generatedAt: new Date().toISOString(),
     scope: `Finite 8-neighbour multi-hazard graph at ${fmt(grid.dx, 2)} m spacing on measured NASA DEM. Model optimality verified against Dijkstra / exact Pareto labels; not certified flight software.`,
     region,
-    input: { start, goal, exclusions },
+    input: { waypoints: report.waypoints || waypoints, exclusions },
+    mission: {
+      waypoints: report.waypoints || waypoints,
+      stopsCount: Math.max(0, (report.waypoints?.length || waypoints.length) - 2),
+      waypointDistancesKm: report.waypointDistancesKm || [],
+      legs: report.legs || []
+    },
     terrain: {
       source: dem.provenance,
       bounds: dem.bounds,
