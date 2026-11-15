@@ -2,6 +2,7 @@ import { DEFAULTS, PRESETS, SOLAR_SCENARIOS, parameters, coordinates, gridPositi
 import { validateClimate, sampleClimate, FIELDS } from './environment.js';
 import { MapView, bindMap } from './rover-map.js';
 
+const TERRAIN_LAB_URL=(typeof localStorage!=='undefined'&&localStorage.getItem('ares-terrain-lab-url'))||'http://127.0.0.1:4174';
 const $ = id => document.getElementById(id);
 const form = $('rover-form'), canvas = $('terrain-map'), ctx = canvas.getContext('2d');
 const fmt = (x, n = 2) => Number.isFinite(x) ? x.toLocaleString('en-US', { maximumFractionDigits: n, minimumFractionDigits: n }) : '—';
@@ -78,6 +79,9 @@ function chainKm() {
 }
 
 function updatePointSummary() {
+  const start = waypoints[0];
+  if (start) $('terrain-lab-link').href = TERRAIN_LAB_URL + '/?' + new URLSearchParams({lat:start.lat.toFixed(4),lon:start.lon.toFixed(4),span:'1',name:region?.name || 'Jezero Mission Zone'});
+
   const stops = Math.max(0, waypoints.length - 2);
   $('point-summary').textContent = waypoints.length < 2
     ? 'Add at least Point A and Point B.'
@@ -104,7 +108,7 @@ function renderWaypoints() {
 
 function clearResults(message) {
   report = null; epoch++;
-  $('export').disabled = $('print').disabled = true;
+  $('export').disabled = $('print').disabled = $('open-3d').disabled = true;
   $('result-title').textContent = 'Recalculation required';
   $('result-description').textContent = message;
   $('metrics').replaceChildren();
@@ -674,6 +678,7 @@ function renderReport() {
 
   $('export').disabled = false;
   $('print').disabled = false;
+  $('open-3d').disabled = !r.path?.length;
 }
 
 function drawProfile(points) {
@@ -1038,6 +1043,7 @@ $('jury-toggle').onclick = () => {
   $('jury-toggle').setAttribute('aria-pressed', String(on));
   requestAnimationFrame(() => { draw(); updateZoomBadge(); });
 };
+$('open-3d').onclick=async()=>{if(!report||!report.path?.length){$('status').textContent='Calculate a feasible route first.';return;}const btn=$('open-3d'),orig=btn.textContent;btn.disabled=true;btn.textContent='Передаю маршрут…';try{const points=report.profile.map(p=>({lat:p.lat,lon:p.lon,elevM:p.elevationM,distKm:p.distanceKm,slopeDeg:p.slopeDeg}));const direct=(report.direct?.path||[]).map(i=>({lat:grid.coords[i].lat,lon:grid.coords[i].lon,elevM:grid.values?.[i]??null}));const body={name:`${region?.name||'Mars'} · ${new Date().toLocaleString('ru-RU')}`,source:'ARES Safe Route Lab',region:region?.name||null,status:report.status,points,direct,metrics:{oneWayKm:report.metrics?.oneWayKm,energy:report.metrics?.energy,maxSlopeDeg:report.metrics?.maxSlopeDeg}};const res=await fetch(TERRAIN_LAB_URL+'/api/routes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!res.ok)throw Error((await res.json().catch(()=>({}))).error||('HTTP '+res.status));const data=await res.json();window.open(`${TERRAIN_LAB_URL}/?route=${encodeURIComponent(data.route.id)}`,'_blank','noopener');btn.textContent='Открыто 3D ↗';setTimeout(()=>{btn.textContent=orig;btn.disabled=false;},1500);}catch(err){btn.textContent=orig;btn.disabled=false;$('status').textContent='3D export failed: '+err.message;}};
 $('print').onclick = () => window.print();
 
 $('export').onclick = () => {

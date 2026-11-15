@@ -10,7 +10,7 @@
 <body>
 <header>
   <a class="brand" href="./#mars">△ ARES <span>SAFE ROUTE LAB</span></a>
-  <nav>
+  <nav><a href="http://127.0.0.1:4174/" id="terrain-lab-link">3D Terrain Lab ↗</a>
     <a href="./#map">Mars Atlas ↗</a>
     <button id="expand-map-nav" type="button" aria-pressed="false">⤢ Wide map</button>
     <button id="jury-toggle" type="button" aria-pressed="false">Methodology view</button>
@@ -259,7 +259,8 @@
       </div>
       <div class="export-actions">
         <button type="button" id="export" disabled>Export JSON mission plan ↓</button>
-        <button type="button" id="print" disabled>Print / PDF brief</button>
+        <button type="button" id="open-3d" disabled>Открыть GPS в 3D ↗</button>
+          <button type="button" id="print" disabled>Print / PDF brief</button>
       </div>
     </div>
     <p id="result-description">The planner never interpolates across missing DEM cells and verifies graph optimality against an independent zero-heuristic Dijkstra search.</p>
