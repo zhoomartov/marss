@@ -1,9 +1,9 @@
 export class MapView {
- constructor(){this.zoom=1;this.x=0;this.y=0;}
+ constructor(maxZoom=4){this.maxZoom=maxZoom;this.zoom=1;this.x=0;this.y=0;}
  fit(){this.zoom=1;this.x=this.y=0;}
  clamp(){const max=1-1/this.zoom;this.x=Math.max(0,Math.min(max,this.x));this.y=Math.max(0,Math.min(max,this.y));}
  point(x,y){return {x:this.x+x/this.zoom,y:this.y+y/this.zoom};}
- scale(factor,x=.5,y=.5){const p=this.point(x,y);this.zoom=Math.max(1,Math.min(4,this.zoom*factor));this.x=p.x-x/this.zoom;this.y=p.y-y/this.zoom;this.clamp();}
+ scale(factor,x=.5,y=.5){const p=this.point(x,y);this.zoom=Math.max(1,Math.min(this.maxZoom,this.zoom*factor));this.x=p.x-x/this.zoom;this.y=p.y-y/this.zoom;this.clamp();}
 }
 
 export function bindMap(canvas,view,{getGrid,getMode,pick,hover,draw}){
