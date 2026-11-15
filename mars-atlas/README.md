@@ -1,10 +1,10 @@
-# Mars Atlas и Safe Route Lab
+# Mars Atlas and Safe Route Lab
 
-Модуль визуализации и планирования маршрутов проекта **ARES**. Общее описание, стек и запуск обоих модулей — в [основном README](../README.md).
+The visualization and route-planning module of **ARES**. See the [main README](../README.md) for the project overview, technology stack, and instructions for running both modules.
 
-## Запуск
+## Running locally
 
-Из этой папки:
+From this directory:
 
 ```bash
 npm ci
@@ -12,62 +12,62 @@ npm start
 ```
 
 - Atlas: http://127.0.0.1:4173/
-- Планировщик: http://127.0.0.1:4173/rover.html
+- Route planner: http://127.0.0.1:4173/rover.html
 
-Сервер публикует папку `dist`. Сборка не нужна. Для передачи маршрутов в 3D запустите также `terrain-lab` по инструкции в основном README.
+The server serves `dist`. No build step is required. To send routes to the 3D viewer, also start `terrain-lab` as described in the main README.
 
-## Основные файлы
+## Key files
 
-| Файл | Назначение |
+| File | Purpose |
 | --- | --- |
-| `dist/app.js` | Состояние интерфейса Atlas, выбор места, переходы в Terrain Lab |
-| `dist/journey.js`, `dist/flight.js` | Космическая сцена и переходы камеры |
-| `dist/wmts.js`, `dist/usgs-themis.js` | Работа с картографическими слоями |
-| `dist/environment.js`, `dist/environment-ui.js` | Климатические сценарии и интерфейс |
-| `dist/rover-core.js` | Модель местности, ресурсы, поиск и проверка маршрутов |
-| `dist/rover-worker.js` | Расчёты планировщика в Web Worker |
-| `dist/rover-ui.js`, `dist/rover-map.js` | Миссионные точки, карта, отчёты и экспорт |
-| `dist/data/mission-regions.json` | Миссионные участки и происхождение данных |
-| `server.mjs` | Локальный статический HTTP-сервер |
+| `dist/app.js` | Atlas interface state, location selection, and Terrain Lab links |
+| `dist/journey.js`, `dist/flight.js` | Space scene and camera transitions |
+| `dist/wmts.js`, `dist/usgs-themis.js` | Map layer integration |
+| `dist/environment.js`, `dist/environment-ui.js` | Climate scenarios and interface |
+| `dist/rover-core.js` | Terrain model, resources, route search, and verification |
+| `dist/rover-worker.js` | Planner computations in a Web Worker |
+| `dist/rover-ui.js`, `dist/rover-map.js` | Mission waypoints, map, reports, and export |
+| `dist/data/mission-regions.json` | Mission areas and data provenance |
+| `server.mjs` | Local static HTTP server |
 
-## Работа с данными
+## Working with data
 
-Команды ниже выполняются из `mars-atlas`. Получение исходных данных требует интернета и может занять время; для обычного запуска используются включённые в репозиторий файлы.
+Run the following commands from `mars-atlas`. Source data retrieval requires internet access and may take time; normal startup uses the files already included in the repository.
 
 ```bash
-# Подготовить снимки и DEM миссионных зон HiRISE
+# Prepare HiRISE imagery and DEMs for mission areas
 npm run fetch:regions
 
-# Получить региональный CTX DEM
+# Retrieve the regional CTX DEM
 node scripts/fetch-rover-dem.mjs
 
-# Подготовить климатические сценарии и архив наблюдений
+# Prepare climate scenarios and archived observations
 node scripts/fetch-climate.mjs
 node scripts/fetch-observations.mjs
 ```
 
-Источники, разрешение и параметры обработки указаны в JSON-файлах данных и скриптах. Архив наблюдений не является автоматическим потоком текущей погоды.
+Sources, resolution, and processing details are recorded in the dataset JSON files and scripts. The observation archive is not an automated live weather feed.
 
-### Конвертация GeoTIFF
+### GeoTIFF conversion
 
-Положите одноканальный Float32 HiRISE DTM в `raw_data/jezero_dtm.tif`:
+Place a single-band Float32 HiRISE DTM at `raw_data/jezero_dtm.tif`:
 
 ```bash
 npm run convert:terrain
 
-# Или укажите вход, выход и размер сетки явно:
+# Or specify the input, output, and grid size explicitly:
 node scripts/convert-hirise-dtm.mjs ./raw_data/jezero_dtm.tif ./public/data/mars_terrain.json 1024
 ```
 
-Конвертер сохраняет проекционную геометрию и метаданные, проверяет единицы и ориентацию растра. Выход содержит `metadata` и построчный массив `elevation`; границы заданы в исходной проекции, а не в широте и долготе.
+The converter preserves the projected footprint and metadata, and validates units and raster orientation. Output contains `metadata` and a row-major `elevation` array; bounds use the source projection rather than latitude and longitude.
 
-При конвертации NoData заполняется минимальной валидной высотой, затем применяется билинейная интерполяция. Такой результат содержит синтетически заполненные участки и не заменяет строгую обработку неизвестной местности в планировщике. Экспорт в `public/data` не подключается автоматически: текущий сервер публикует `dist`.
+Conversion fills NoData with the minimum valid elevation before applying bilinear interpolation. The resulting dataset contains synthetic fills and does not replace the planner's strict treatment of unknown terrain. Files exported to `public/data` are not connected automatically: the current server serves `dist`.
 
-## Проверки
+## Validation
 
 ```bash
 npm run check
 npm test
 ```
 
-Тесты охватывают переходы камеры, тайлы, климат, геопривязку, преобразование GeoTIFF, ограничения маршрутов и миссии с промежуточными остановками. Для оценки визуального результата отдельно проверяйте интерфейс в браузере.
+Tests cover camera transitions, tiles, climate, georeferencing, GeoTIFF conversion, route constraints, and missions with intermediate stops. Check the interface separately in a browser to assess visual behavior.

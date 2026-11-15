@@ -1,34 +1,34 @@
 # ARES — Mars Exploration Atlas
 
-Интерактивный атлас Марса, планировщик маршрутов и лаборатория трёхмерного рельефа. Проект объединяет космическую визуализацию, орбитальные снимки и цифровые модели высот NASA / USGS в одном исследовательском интерфейсе.
+An interactive Mars atlas, mission route planner, and 3D terrain laboratory. ARES brings space visualization, orbital imagery, and NASA / USGS elevation data into a single research interface.
 
-## Возможности
+## Features
 
-- **Космическое путешествие:** переход от Млечного Пути к Солнечной системе и Марсу, просмотр восьми планет, Фобоса и Деймоса.
-- **Атлас поверхности:** 3D-глобус и 2D-карта, выбор координат, масштабирование, орбитальные слои и детальные CTX-тайлы.
-- **Климатические сценарии:** температура, давление, ветер и пыль из Mars Climate Database; архивные наблюдения MEDA и REMS.
-- **Safe Route Lab:** маршрут через упорядоченные промежуточные точки, зоны исключения, ограничения по уклону, энергии, времени и моделируемым рискам. Сравнение вариантов, профиль высот, JSON-отчёт и печать.
-- **3D Terrain Lab:** загрузка рельефа и снимков выбранного участка, каталог марсианских объектов, пользовательские локации, просмотр маршрутов на поверхности и экспорт GPX.
-- **Связь модулей:** переход из атласа в 3D по координатам и передача рассчитанного маршрута из планировщика в Terrain Lab.
+- **Space journey:** travel from the Milky Way through the Solar System to Mars; explore all eight planets, Phobos, and Deimos.
+- **Surface atlas:** switch between a 3D globe and a 2D map, select coordinates, zoom, and explore orbital layers and detailed CTX tiles.
+- **Climate scenarios:** explore temperature, pressure, wind, and dust from the Mars Climate Database, alongside archived MEDA and REMS observations.
+- **Safe Route Lab:** plan routes through ordered waypoints with exclusion zones and constraints on slope, energy, time, and modeled risks. Compare alternatives, inspect elevation profiles, export JSON reports, and print mission briefs.
+- **3D Terrain Lab:** load terrain and imagery for a selected area, browse named Martian features, save custom locations, view routes on the surface, and export GPX.
+- **Connected modules:** open atlas coordinates in 3D and send calculated routes from the planner to Terrain Lab.
 
-## Технологический стек
+## Technology stack
 
-| Слой | Технологии |
+| Layer | Technologies |
 | --- | --- |
-| Интерфейс | HTML5, CSS3, JavaScript с ES Modules |
-| 3D-графика | Three.js r170, WebGL, OrbitControls, GLTFLoader |
-| Карты и расчёты | Canvas 2D, Web Workers, географические координаты Марса |
-| Сервер | Node.js, встроенный HTTP-сервер, REST API |
-| Геоданные | GeoTIFF.js, DEM / DTM, GeoTIFF / COG, WMTS и ArcGIS-сервисы |
-| Хранение | JSON-файлы и файловый кэш Terrain Lab |
-| Поиск маршрутов | A*, проверка через Dijkstra, поиск с ограничениями ресурсов |
-| Проверки | Node.js Test Runner (`node --test`), `node --check` |
+| Interface | HTML5, CSS3, JavaScript with ES Modules |
+| 3D graphics | Three.js r170, WebGL, OrbitControls, GLTFLoader |
+| Mapping and computation | Canvas 2D, Web Workers, Mars geographic coordinates |
+| Server | Node.js, built-in HTTP server, REST API |
+| Geospatial data | GeoTIFF.js, DEM / DTM, GeoTIFF / COG, WMTS and ArcGIS services |
+| Storage | JSON files and Terrain Lab's filesystem cache |
+| Route planning | A*, Dijkstra verification, resource-constrained search |
+| Validation | Node.js Test Runner (`node --test`), `node --check` |
 
-Фронтенд работает без сборщика. Готовые статические файлы находятся в `mars-atlas/dist` и `terrain-lab/public`.
+The frontend requires no build step. Static application files are stored in `mars-atlas/dist` and `terrain-lab/public`.
 
-## Быстрый старт
+## Quick start
 
-Нужны Git, npm и Node.js. Проверенная версия Node.js — **22.20.0**. Браузер должен поддерживать WebGL. Для загрузки внешних карт и новых данных нужен интернет.
+Install Git, npm, and Node.js. The project has been tested with **Node.js 22.20.0**. Use a browser with WebGL support. Internet access is required for external map layers and new data downloads.
 
 ```bash
 git clone https://github.com/zhoomartov/marss.git
@@ -36,61 +36,61 @@ cd marss
 npm ci --prefix mars-atlas
 ```
 
-Запустите оба сервера в отдельных терминалах из корня репозитория.
+Run both servers in separate terminals from the repository root.
 
-**Терминал 1 — Atlas и планировщик:**
+**Terminal 1 — Atlas and route planner:**
 
 ```bash
 npm start --prefix mars-atlas
 ```
 
-**Терминал 2 — 3D Terrain Lab:**
+**Terminal 2 — 3D Terrain Lab:**
 
 ```bash
 npm start --prefix terrain-lab
 ```
 
-| Раздел | Адрес |
+| Application | URL |
 | --- | --- |
 | Mars Atlas | http://127.0.0.1:4173/ |
 | Safe Route Lab | http://127.0.0.1:4173/rover.html |
 | 3D Terrain Lab | http://127.0.0.1:4174/ |
-| Состояние API | http://127.0.0.1:4174/api/health |
+| API health | http://127.0.0.1:4174/api/health |
 
-Terrain Lab использует встроенные модули Node.js и библиотеки из `public/assets`; отдельная установка npm-зависимостей для него не требуется. Остановить каждый сервер можно сочетанием `Ctrl+C` в его терминале.
+Terrain Lab uses built-in Node.js modules and libraries bundled in `public/assets`; it does not require a separate npm dependency installation. Press `Ctrl+C` in each terminal to stop its server.
 
-## Как пользоваться
+## Using the project
 
-1. Откройте Atlas и перейдите к Марсу, затем к карте поверхности.
-2. Выберите точку на карте и откройте её через **Open 3D Terrain Lab**.
-3. Для расчёта маршрута откройте `/rover.html`, выберите участок и параметры миссии.
-4. Задайте начало, промежуточные остановки и конечную точку; выполните расчёт.
-5. Изучите сравнение маршрутов и профиль высот. Кнопка **Открыть GPS в 3D** передаст маршрут в Terrain Lab; там доступен экспорт GPX.
+1. Open Atlas, travel to Mars, and switch to the surface map.
+2. Select a location and choose **Open 3D Terrain Lab**.
+3. To plan a route, open `/rover.html`, select a mission area, and configure mission parameters.
+4. Set the start, intermediate stops, and destination, then calculate the route.
+5. Review route comparisons and the elevation profile. Use the GPS-to-3D export button to send the route to Terrain Lab, where GPX export is available.
 
-## Структура репозитория
+## Repository structure
 
 ```text
 marss/
 ├── README.md
 ├── mars-atlas/
-│   ├── dist/                 # Интерфейс Atlas и Safe Route Lab
-│   │   ├── assets/           # Локальные модели, текстуры и библиотеки
-│   │   └── data/             # DEM, климат и данные миссионных участков
-│   ├── scripts/              # Получение данных и конвертация GeoTIFF
-│   ├── *.test.mjs            # Тесты карт, полёта и планировщика
-│   ├── server.mjs            # Статический сервер Atlas
-│   └── README.md             # Технические инструкции модуля
+│   ├── dist/                 # Atlas and Safe Route Lab interface
+│   │   ├── assets/           # Bundled models, textures, and libraries
+│   │   └── data/             # DEM, climate, and mission area datasets
+│   ├── scripts/              # Data retrieval and GeoTIFF conversion
+│   ├── *.test.mjs            # Mapping, flight, and planner tests
+│   ├── server.mjs            # Atlas static server
+│   └── README.md             # Module technical guide
 └── terrain-lab/
-    ├── public/               # 3D-интерфейс, worker и библиотеки
-    ├── data/                 # Каталог объектов, локации и маршруты
-    ├── cache/                # Кэш внешних данных, создаётся при работе
-    ├── server.mjs            # REST API и сервер интерфейса
-    └── terrain.test.mjs      # Геометрия, координаты и API-тесты
+    ├── public/               # 3D interface, worker, and libraries
+    ├── data/                 # Feature catalog, locations, and routes
+    ├── cache/                # External data cache, created at runtime
+    ├── server.mjs            # REST API and interface server
+    └── terrain.test.mjs      # Geometry, coordinate, and API tests
 ```
 
-## Проверки
+## Validation
 
-Запускаются из корня репозитория:
+Run from the repository root:
 
 ```bash
 npm run check --prefix mars-atlas
@@ -99,41 +99,41 @@ npm run check --prefix terrain-lab
 npm test --prefix terrain-lab
 ```
 
-При объединении модулей прошли **62 теста Atlas и 7 тестов Terrain Lab**. Интеграционные тесты Terrain Lab запускают локальные HTTP-серверы; проверка глобального рельефа обращается к внешним сервисам NASA и зависит от их доступности.
+The module integration passed **62 Atlas tests and 7 Terrain Lab tests**. Terrain Lab integration tests start local HTTP servers; the global terrain test also requests external NASA services and depends on their availability.
 
-## Настройка серверов
+## Server configuration
 
-| Переменная | Модуль | Значение по умолчанию |
+| Variable | Module | Default |
 | --- | --- | --- |
 | `PORT` | Atlas | `4173` |
 | `PORT` | Terrain Lab | `4174` |
 | `HOST` | Terrain Lab | `127.0.0.1` |
 | `ATLAS_URL` | Terrain Lab | `http://127.0.0.1:4173` |
-| `MARS_DIST_DIR` | Terrain Lab | Соседняя папка `mars-atlas/dist` |
+| `MARS_DIST_DIR` | Terrain Lab | The adjacent `mars-atlas/dist` directory |
 
-Если Terrain Lab работает по другому адресу, задайте его в консоли браузера на странице Atlas и перезагрузите страницу:
+If Terrain Lab runs at a different address, set it in the browser console on the Atlas page and reload:
 
 ```js
 localStorage.setItem('ares-terrain-lab-url', 'http://127.0.0.1:5174');
 location.reload();
 ```
 
-Atlas можно размещать как статический сайт из `mars-atlas/dist`. Для функций Terrain Lab нужен работающий Node.js-сервер и доступные для записи папки данных и кэша. При размещении на сервере настройте адреса обоих модулей: ссылки на `127.0.0.1` предназначены для локального запуска.
+Atlas can be hosted as a static site from `mars-atlas/dist`. Terrain Lab requires a running Node.js server and writable data and cache directories. For a hosted deployment, configure both module addresses: `127.0.0.1` links are intended for local use.
 
-## Данные и атрибуция
+## Data sources and credits
 
-- **NASA / JPL-Caltech / USGS:** орбитальные снимки, CTX / HiRISE DEM и DTM, модели спутников Марса. Ссылки на конкретные продукты и параметры обработки сохранены в данных проекта.
-- **NASA Mars Trek:** глобальные модели высот HRSC / MOLA и картографические слои.
-- **Caltech Murray Lab / Esri / NASA / JPL / MSSS:** CTX V01 — детальная мозаика поверхности.
-- **Mars Climate Database 6.2 (LMD / OU / IAA / ESA / CNES):** климатические сценарии.
-- **MEDA / REMS:** архивные наблюдения марсианских станций.
-- **Solar System Scope:** текстуры планет, лицензия CC BY 4.0.
-- **NASA/JPL-Caltech PIA10748:** художественное изображение Млечного Пути, использованное для визуализации галактики.
+- **NASA / JPL-Caltech / USGS:** orbital imagery, CTX / HiRISE DEM and DTM products, and Mars moon models. Product references and processing details are retained in the project datasets.
+- **NASA Mars Trek:** global HRSC / MOLA elevation models and map layers.
+- **Caltech Murray Lab / Esri / NASA / JPL / MSSS:** the detailed CTX V01 surface mosaic.
+- **Mars Climate Database 6.2 (LMD / OU / IAA / ESA / CNES):** climate scenarios.
+- **MEDA / REMS:** archived observations from Mars surface stations.
+- **Solar System Scope:** planetary textures, licensed under CC BY 4.0.
+- **NASA/JPL-Caltech PIA10748:** the Milky Way artist's concept used for the galaxy visualization.
 
-Лицензии сторонних библиотек находятся рядом с ними в папках `assets`. Отдельная лицензия на исходный код всего проекта в репозитории пока не объявлена; условия сторонних данных и ресурсов сохраняют силу.
+Third-party library licenses are included alongside the libraries in the `assets` directories. The repository does not currently declare a project-wide source code license; third-party data and asset terms continue to apply.
 
-## Границы модели
+## Model limitations
 
-ARES — исследовательский и демонстрационный проект. Масштабы космической сцены и орбиты иллюстративны. Климатические сценарии не являются текущим прогнозом погоды. «Оптимальный маршрут» означает результат на выбранном конечном графе при заданных параметрах модели, а не подтверждённую безопасность реальной миссии. Качество снимков и разрешение DEM различаются; увеличение изображения не создаёт новых измерений рельефа.
+ARES is a research and demonstration project. Space scene scales and orbits are illustrative. Climate scenarios are not current weather forecasts. An “optimal route” is a result on the selected finite graph under the configured model parameters, not a certification of real mission safety. Imagery and DEM resolution differ; zooming into an image does not create new terrain measurements.
 
-Проект независимый и не аффилирован с NASA.
+This is an independent project and is not affiliated with NASA.
